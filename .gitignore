@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.agents/
+test-results/
+playwright-report/
+.env
+.env.*
+*.log
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+runtime/
+backend/data/raw/
+backend/data/processed/
+backend/models/*.pt
+backend/results/raw/
