@@ -1,4 +1,4 @@
-# SecureCloud MVP Implementation Plan
+# SecureCloud: Zero Trust Security Framework for Multi-Tenant Cloud Virtualisation — MVP Implementation Plan
 
 ## 1. MVP Definition
 
@@ -23,7 +23,33 @@ Sign in
 → restore the approved policy
 ```
 
-The infrastructure demonstrator supports two tenants and three templates: web, API, and database. The frontend data model is not restricted to two tenants.
+The infrastructure demonstrator supports two active lab tenants and three bounded template classes: web, API/worker, and database/cache. The frontend data model is not restricted to two tenants. The target reference lab is a generic retail organization and a facilities vendor, based on a bounded adaptation of Google Cloud's Apache-2.0 Online Boutique. The current School/Hospital three-tier applications remain an implemented compatibility fixture until the retail stack replaces them.
+
+### 1.1 Demonstration narrative
+
+The target demonstration is inspired by the publicly documented 2013 Target breach: stolen third-party vendor credentials were used for initial access, followed by movement toward sensitive retail systems and point-of-sale malware. Target's [written Senate testimony](https://www.commerce.senate.gov/wp-content/uploads/media/doc/Mulligan%20Testimony.pdf) supports the vendor-credential and point-of-sale facts; the Senate staff [kill-chain analysis](https://www.commerce.senate.gov/wp-content/uploads/media/doc/2014%200325%20Target%20Kill%20Chain%20Analysis.pdf) explicitly notes uncertainty about the exact escalation path. SecureCloud therefore does **not** claim to reproduce the historical attack. It recreates only the defensible security problem: a trusted vendor relationship is compromised and then used abnormally.
+
+The end-to-end demonstration is:
+
+```text
+Create RetailCo and FacilitiesVendor tenants
+→ deploy approved functional application stacks
+→ establish one explicit vendor-to-maintenance business intent
+→ generate ordinary shopping and maintenance activity
+→ learn a tenant-agnostic benign communication baseline
+→ use the valid vendor path in an abnormal temporal pattern
+→ detect rising risk while requests are still policy-allowed
+→ attempt a forbidden payment-service connection
+→ show deterministic Cilium prevention
+→ quarantine the compromised vendor workload
+→ verify withdrawal of its previously allowed maintenance access
+→ review, restore, and verify least-privilege access
+```
+
+This separates the two contributions visibly:
+
+- The temporal model detects abnormal use of technically valid access.
+- Static zero-trust policy prevents explicitly unauthorized access, and the response plane contains and restores the workload.
 
 ## 2. Repository Layout
 
@@ -32,6 +58,7 @@ actualfyp/
 ├── frontend/                 # React web application
 │   ├── src/
 │   ├── public/
+│   ├── reference-app/         # School/Hospital compatibility fixture during migration
 │   ├── tests/
 │   ├── package.json
 │   └── vite.config.ts
@@ -44,6 +71,7 @@ actualfyp/
 │   ├── detection/            # graph builder, model, scoring, rules
 │   ├── incidents/            # evidence, quarantine, restore
 │   ├── experiments/          # scenarios, evaluation, plots
+│   ├── reference_apps/       # Compatibility fixture plus SecureCloud-owned retail/vendor services
 │   ├── manifests/            # lab and workload manifests
 │   └── tests/
 ├── docs/
@@ -69,6 +97,8 @@ Directories under `backend/` are created only when their implementation phase be
 | Hubble JSON exporter | Use directly | Add a small file-tail collector and SecureCloud identity normalization |
 | PyTorch Geometric Temporal `GConvGRU` | Reuse as the model encoder | Add graph construction, negative sampling, link decoder, calibration, and evidence records |
 | Euler repository | Do not import | Reuse the published temporal-link-prediction method and evaluate it in the SecureCloud lab |
+| [Google Cloud Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo) | Reuse a bounded subset under Apache-2.0 | Retain notices; adapt branding, manifests, resource limits, persistence, labels, and SecureCloud catalog metadata |
+| OWASP Juice Shop | Do not use as the main demonstrator | Its intentionally vulnerable monolith emphasizes web exploitation rather than workload-graph behaviour and lateral movement |
 
 ---
 
@@ -180,7 +210,7 @@ Implement one advanced detector: **temporal graph link prediction**.
 
 The engine learns normal workload-to-workload communication from benign graph snapshots and assigns a low likelihood to unexpected future edges. This follows the method demonstrated by King and Huang in [Euler: Detecting Network Lateral Movement via Scalable Temporal Graph Link Prediction](https://doi.org/10.14722/ndss.2022.24107).
 
-Use PyTorch Geometric Temporal rather than importing the full Euler research codebase. PyTorch Geometric Temporal provides temporal snapshot iterators and reusable recurrent graph layers, including `GConvGRU`, under the MIT license. See the [project repository](https://github.com/benedekrozemberczki/pytorch_geometric_temporal) and [`GConvGRU` documentation](https://pytorch-geometric-temporal.readthedocs.io/en/stable/modules/root.html).
+Use the MIT-licensed PyTorch Geometric Temporal `GConvGRU` design rather than importing the full Euler research codebase. Release `0.56.2` cannot be imported normally in the Python 3.14 Windows lab because its package initializer requires an unavailable `torch-sparse` build, so the project retains an attributed API-compatible cell built on base PyTorch Geometric `ChebConv`. See the [project repository](https://github.com/benedekrozemberczki/pytorch_geometric_temporal), [`GConvGRU` documentation](https://pytorch-geometric-temporal.readthedocs.io/en/stable/modules/root.html), and `backend/detection/THIRD_PARTY_NOTICES.md`.
 
 ### 4.2 Graph definition
 
@@ -191,13 +221,15 @@ Create one directed graph snapshot every 30 seconds.
 **Node features:**
 
 - Template type: web, API, or database.
-- Tenant identity encoded without treating tenant number as an ordered value.
 - Inbound flow count.
 - Outbound flow count.
 - Denied-flow ratio.
 - Unique destination count.
 - Unique destination-port count.
 - Workload running/quarantined state.
+- Service role and exposure class from allowlisted catalog metadata.
+
+Tenant names and tenant IDs are excluded from learned features. Stable IDs are used only for graph indexing and evidence. This allows one feature schema to score arbitrary tenant names and prevents a checkpoint from being coupled to `college`, `hospital`, `retail`, or `vendor` labels.
 
 **Edges:** observed source-to-destination communication.
 
@@ -210,6 +242,8 @@ Create one directed graph snapshot every 30 seconds.
 - Protocol.
 - Approved-path indicator.
 - Cross-tenant indicator.
+- Same-tenant indicator.
+- Business-intent type, encoded from a bounded vocabulary rather than a tenant name.
 
 ### 4.3 Model
 
@@ -231,22 +265,33 @@ Use negative sampling during training. Train only on reviewed benign windows. Sp
 
 ### 4.4 Risk and incident decision
 
-The graph anomaly score is the main learned signal. Four explicit facts accompany it:
+Score every resolved Hubble flow window, including policy-allowed traffic. Do not pre-filter the model input to denied or cross-tenant events. The graph anomaly score is the main learned signal. An exponentially weighted risk value carries evidence across consecutive windows without introducing a second learned detector:
+
+```text
+risk(t) = alpha × anomaly(t) + (1 - alpha) × risk(t-1)
+```
+
+Select `alpha`, the calibrated anomaly threshold, and the persistence threshold using calibration data only. Record both raw anomaly and accumulated risk. Explicit facts accompany the learned score:
 
 - Cross-tenant attempt.
 - Policy-denied verdict.
 - Horizontal destination fan-out.
 - Vertical port fan-out.
+- Use of an approved cross-tenant intent outside its declared maintenance window.
+- Workload lifecycle or identity change near the event.
 
 The MVP incident rule is:
 
 ```text
-Create an incident when:
-  calibrated graph anomaly threshold is exceeded
-  AND at least one explicit security fact is present
+Create an alert when:
+  calibrated graph anomaly or accumulated-risk threshold is exceeded
+
+Recommend automated containment only when:
+  elevated learned risk persists
+  AND at least one independently observed security fact is present
 ```
 
-The detector does not write Cilium policies. It creates evidence and a containment recommendation. The authorized middleware operation applies or restores policy.
+An ML-only alert remains reviewable evidence and is never represented as a confirmed attack. The detector does not write Cilium policies. It creates evidence and, when the stricter gate is met, a containment recommendation. The authorized middleware operation applies or restores policy.
 
 ### 4.5 Engine artifacts
 
@@ -295,6 +340,9 @@ backend/models/
 - Unknown telemetry identity produces an inconclusive result.
 - Every incident records model version, threshold, score, supporting facts, and source events.
 - The temporal model is compared with the edge-frequency baseline using the same held-out data.
+- The same trained feature schema accepts arbitrary tenant names.
+- Allowed and denied traffic are both scored.
+- At least one held-out scenario can be detected before its first policy-denied event, or the project must report that no predictive lead time was demonstrated.
 
 ---
 
@@ -345,21 +393,42 @@ Implement three internal templates:
 
 Each template defines a pinned image, non-root user, read-only filesystem where possible, dropped capabilities, resource requests/limits, health probes, stable labels, and approved ports.
 
-### 6.3 Enforcement sequence
+### 6.3 Reference applications and traffic source
+
+Replace the six-node School/Hospital fixture with a bounded, generic retail/vendor reference lab. Reuse only the Online Boutique services that materially contribute to the experiment; do not import all services merely because they exist.
+
+| Tenant | Approved stack | Functional workflow |
+|---|---|---|
+| RetailCo | storefront, product catalogue, cart/cache, checkout, payment simulator, order database, maintenance gateway | Browse products, add to cart, checkout, record an order, and view order status |
+| FacilitiesVendor | vendor portal, maintenance API, vendor database | Submit and review project-owned maintenance work orders |
+
+The feasibility spike established that the upstream frontend and checkout dependency chain requires all 12 Online Boutique deployments unless SecureCloud maintains a fork or replacement stubs. The first working `retail-stack` therefore starts from the full pinned `v0.10.3` dependency set, then removes a service only after the adapted stack passes the same browse, cart, checkout, and load tests. Small SecureCloud-owned order persistence, maintenance gateway, vendor portal/API, and database components are added only where the experiment requires them. All imported source retains its Apache-2.0 notices. Branding remains generic and does not copy Target names, logos, assets, or trade dress. See [the feasibility record](RETAIL_FEASIBILITY.md).
+
+The portal provisions these through two allowlisted composite stack definitions. Portal users still choose only safe catalog entries; they never submit images or raw Kubernetes YAML. Each service remains an independently labelled workload so Hubble can construct a meaningful temporal graph.
+
+Default deny remains in force. One explicit, narrow cross-tenant business intent permits `vendor-api → retail-maintenance-gateway` on its declared port. It requires authorization from both tenant administrators and is versioned as policy evidence. No other vendor-to-retail edge is permitted.
+
+Normal activity is generated by ordinary storefront use, the upstream load generator, and low-frequency vendor work-order activity. The web applications remain independently usable without SecureCloud. Preview access is routed through an authenticated, tenant-authorized backend endpoint; internal services and databases are not exposed directly.
+
+In real API mode, the customer portal does not expose attack or traffic-simulation buttons. Security evidence comes from Hubble. A separate experiment harness under `backend/experiments/` executes allowlisted incident-inspired behaviours against project-owned namespaces and Services. It uses valid test credentials and real application requests, accepts scenario IDs rather than arbitrary commands or targets, and cannot address external systems.
+
+The existing School/Hospital applications remain only as a regression fixture during migration and are removed from the primary demonstration after retail/vendor acceptance tests pass.
+
+### 6.4 Enforcement sequence
 
 1. Create one namespace per infrastructure tenant.
 2. Apply restricted namespace security labels.
 3. Apply default-deny ingress and egress.
 4. Permit DNS.
-5. Permit web-to-API communication within the tenant.
-6. Permit API-to-database communication within the tenant.
-7. Deny cross-tenant communication.
-8. Verify approved and forbidden paths with explicit controls.
+5. Apply the versioned intra-tenant intents declared by the selected composite stack.
+6. Deny cross-tenant communication by default.
+7. Apply only the bilateral `vendor-api → retail-maintenance-gateway` exception.
+8. Verify approved, default-denied, and explicitly cross-tenant-approved paths with positive and negative controls.
 9. Persist Kubernetes UID and resource version on every managed workload.
 
-### 6.4 Quarantine
+### 6.5 Quarantine
 
-Quarantine is durable desired state in SQLite. The reconciler reapplies it after pod replacement. Full quarantine withdraws previously approved workload access while retaining only the minimum management path needed for health/evidence collection.
+Quarantine is durable desired state in SQLite. The reconciler reapplies it after pod replacement. Full quarantine withdraws all ingress and egress for the selected workload, including its previously approved paths; evidence and recovery remain available through the separate control plane.
 
 Restore reapplies the workload's previously approved policy version and verifies both the restored approved path and continued forbidden-path denial.
 
@@ -425,10 +494,13 @@ Use identical static policies and traffic for all comparable runs.
 
 ### 9.2 Scenarios
 
+All scenarios run through the separate experiment harness. The portal remains the operator view for topology, evidence, incidents, quarantine, and restore.
+
 **Benign:**
 
-- Normal web-to-API-to-database traffic.
-- Legitimate traffic surge.
+- Normal browsing, cart, checkout, order, and maintenance traffic.
+- Legitimate shopping surge.
+- Scheduled vendor maintenance burst.
 - Workload restart.
 - New approved deployment.
 - Temporary service failure.
@@ -440,7 +512,9 @@ Use identical static policies and traffic for all comparable runs.
 - Vertical port scan.
 - Unexpected destination.
 - Low-rate lateral movement.
-- Suspicious use of a previously approved path.
+- Compromised-vendor use of the valid maintenance path.
+- Abnormal fan-out and ordering across policy-allowed service paths.
+- Forbidden vendor-to-payment attempt after allowed-path reconnaissance.
 
 ### 9.3 Measurements
 
@@ -448,6 +522,8 @@ Use identical static policies and traffic for all comparable runs.
 - Precision, recall, F1, and false-positive rate.
 - Precision-recall AUC.
 - Detection latency.
+- Predictive lead time relative to the first policy-denied event.
+- Detection rate for policy-allowed malicious behaviour.
 - Containment time.
 - Recovery time.
 - Approved-service disruption.
@@ -456,6 +532,22 @@ Use identical static policies and traffic for all comparable runs.
 - Model training and inference time.
 
 Run at least 30 repetitions per scenario and five model seeds. Export raw events, ground truth, configuration, predictions, operations, and summaries as machine-readable JSONL/CSV.
+
+### 9.4 Implemented evaluation artifacts
+
+The current offline runner is `python -m backend.experiments.runner`. It executes the 11 allowlisted scenarios with 30 repetitions and five seeds by default and writes the following ignored runtime artifacts under `runtime/experiments/offline/`:
+
+- `events.jsonl` — raw event-level policy verdicts and ground truth.
+- `predictions.jsonl` — edge-frequency scores, thresholds, predictions, and labels.
+- `runs.csv` — per-run prevention, classification, latency, and inference measurements.
+- `summary.csv` and `summary.json` — per-scenario and overall metrics with 95% Wilson intervals.
+- `manifest.json` — exact seeds, repetitions, scenarios, thresholds, implementation status, and limitations.
+
+The currently implemented live runner is `python -m backend.experiments.live_runner`. It quarantines only `college-api` in the project-owned loopback K3s compatibility lab, brackets every run with positive School and Hospital controls, verifies Cilium policy read-back, observes withdrawal and recovery through the School application, and exports raw cycles plus timing distributions under `runtime/experiments/live/`. It must be migrated to allowlisted retail/vendor workload IDs after the new reference stack is operational.
+
+The learned `GConvGRU` link predictor, chronological training, negative sampling, calibration, per-seed persistence, offline comparison, and continuous API-loop inference are implemented. The API loads a local weights-only checkpoint through `SECURECLOUD_TEMPORAL_MODEL`, rejects incompatible feature schemas, correlates model anomalies with explicit security facts, and persists model version, threshold, score, facts, and source-event IDs. With no configured checkpoint, the API explicitly reports and uses the edge-frequency baseline.
+
+The implemented checkpoint and live pipeline are **not** the final general-purpose detector: their tenant one-hot features are coupled to College/Hospital, and online candidate selection currently emphasizes denied or cross-tenant flows. The next detector revision must remove tenant identity features, score all resolved traffic, add calibrated accumulated risk, retrain on the retail/vendor topology, and repeat the full evaluation. The current five-seed result in `backend/detection/model_card.md` does not outperform the edge-frequency baseline on the small fixed topology and must not be used as evidence of predictive improvement. CPU/memory overhead measurement remains pending.
 
 ---
 
@@ -466,14 +558,46 @@ Run at least 30 repetitions per scenario and five model seeds. Export raw events
 | M1 | Kokonut console shell and API-backed authentication | 10% |
 | M2 | Tenant, catalog, workload lifecycle, and operation status | 40% |
 | M3 | Kubernetes deployment plus default-deny and approved paths | 60% |
-| M4 | Hubble telemetry plus temporal-graph incidents | 80% |
+| M4 | Retail/vendor reference stacks, Hubble telemetry, and tenant-agnostic temporal-graph incidents | 80% |
 | M5 | Durable quarantine, restore, and evaluation dataset | 100% |
 
-The 60% milestone is accepted only when the web portal deploys a real bounded workload and the lab verifies tenant-local allowed traffic and forbidden cross-tenant traffic.
+The 60% milestone is accepted only when the web portal deploys a real bounded workload and the lab verifies tenant-local allowed traffic, default cross-tenant denial, and the exact authorized vendor-to-maintenance exception with positive and negative controls.
+
+### 10.1 Next implementation sequence
+
+1. **Feasibility recorded:** version, licence, dependencies, immutable image digests, Kubernetes reservations, and a successful browse/cart/checkout transaction are recorded in [the retail feasibility report](RETAIL_FEASIBILITY.md). Steady-state consumption and Hubble flow counts remain pending because the local observability pods restarted during collection.
+2. **Catalog definitions implemented:** the authenticated management API exposes fixed `retail-stack` and `facilities-vendor-stack` service graphs from `backend/catalog.py`. Callers cannot submit images or YAML. The API enables an action only when its infrastructure adapter is configured.
+3. **Retail reconciler implemented and live-verified:** the portal can create one persisted composite operation, the Kubernetes adapter applies the pinned 12-service retail graph, and each component is retained as an independently observed workload with its Kubernetes UID and resource version. On 18 November 2026, the queued operation reconciled to `succeeded`, all 12 deployments reported `1/1` ready, the restricted namespace labels were read back, the real portal displayed all 12 components, and browse/cart/checkout completed through the deployed frontend. The FacilitiesVendor adapter, explicit service-path policy, and Hubble measurement remain pending, so this does not complete M3 or M4.
+4. Deploy the independently usable FacilitiesVendor application, then add versioned bilateral approval for the single vendor-to-maintenance intent while retaining default deny everywhere else.
+5. Produce normal shopping and maintenance Hubble traffic and verify stable workload identity mapping.
+6. Replace tenant-name one-hot features with tenant-agnostic node and relational edge features.
+7. Score all resolved flows, implement calibrated EWMA risk, and distinguish ML-only alerts from containment recommendations.
+8. Implement the allowlisted compromised-vendor scenario using real requests and test credentials inside the project lab.
+9. Retrain, recalibrate, and rerun 30 repetitions across five seeds against identical policy and traffic inputs.
+10. Update the portal incident trace and evaluation view with anomaly, accumulated risk, facts, prevention, predictive lead time, and containment evidence.
+11. Retire School/Hospital from the primary demo only after equivalent lifecycle, policy, telemetry, containment, and recovery tests pass.
 
 ---
 
 ## 11. Architecture Decisions
+
+### Composite stack persistence and reconciliation
+
+**Context:** a composite catalog entry creates multiple independently observable Kubernetes workloads, but the portal must present one user operation and must be able to resume it after an API restart.
+
+**Options considered:** flatten a stack into unrelated workload operations; store only one opaque stack row; or persist one stack deployment and operation while retaining a workload record for every component.
+
+**Decision:** persist a stack deployment and stack operation for the user-level lifecycle request, and create one component workload record per catalog service. The reconciler owns the allowlisted stack graph and updates each component from positive Kubernetes observations.
+
+**Rationale:** the user sees one bounded deployment action, while topology, telemetry identity, health, and later containment still operate on stable component workload IDs. Persisted operations allow restart-safe reconciliation without accepting raw images or manifests from callers.
+
+**Trade-offs accepted:** stack and component state can temporarily differ while reconciliation is running, and stack lifecycle needs explicit orchestration rather than reusing a single-workload endpoint.
+
+**Consequences and mitigation:** the database links every component to its stack; the operation remains pending until every expected Deployment is ready; missing or unknown observations do not become success; and tenant authorization is checked before infrastructure availability or mutation.
+
+**Validation:** API boundary tests cover authorization, allowlisting, and fail-closed behaviour; adapter tests assert the exact 12-component inventory and namespace controls; a restart reconciliation was verified against the local K3s lab; and a non-mutating browser test verified that the API-backed portal renders the 12 observed components.
+
+**Revisit trigger:** introduce a generic graph reconciler only after the FacilitiesVendor stack demonstrates shared lifecycle behaviour that cannot be expressed cleanly by the current bounded adapter.
 
 ### Backend shape
 
@@ -499,6 +623,40 @@ The 60% milestone is accepted only when the web portal deploys a real bounded wo
 
 **Trade-off:** this provides a clear research feature while excluding a collection of unrelated detectors. A simple edge-frequency scorer remains only as the experimental baseline.
 
+### Reference application and incident narrative
+
+**Context:** the six-node School/Hospital graph is sufficient for lifecycle and policy tests but too small and regular to demonstrate a convincing independent contribution from temporal graph learning. Building a large custom microservice application would consume the project without adding security research value.
+
+**Options considered:** retain School/Hospital; build a custom microservice system; deploy Online Boutique unchanged; maintain a fork with replacement stubs; or begin with the complete pinned dependency set and reduce it only behind functional acceptance tests.
+
+**Decision:** use the complete, digest-pinned Online Boutique `v0.10.3` dependency set as the first known-working `RetailCo` stack, apply SecureCloud resource and security controls, add a SecureCloud-owned `FacilitiesVendor` stack, and use a Target-2013-inspired vendor-credential scenario. A service may be removed later only if the adapted stack still passes browse, cart, checkout, load, and telemetry tests.
+
+**Rationale:** dependency inspection and a real checkout proved that the proposed six-service subset is not independently runnable without a maintained fork or stubs. Starting from the known-working graph avoids spending the FYP on application rewrites while providing repeatable traffic, permissively licensed source, and a credible valid-access-to-lateral-movement narrative within the two-tenant laboratory limit.
+
+**Trade-offs accepted:** 12 imported deployments use more memory, image storage, and operational attention than the proposed subset; they also add multiple languages outside the team's application code. This is acceptable because the imported application remains a replaceable lab adapter and SecureCloud itself remains a modular monolith. The historical mapping remains an analogy rather than a forensic reconstruction.
+
+**Consequences and mitigation:** final resource and flow measurements must include the full dependency graph; immutable digests and quotas bound supply-chain and capacity drift; explicit service-path policies replace the feasibility spike's broad same-namespace allowance; and a smaller fork is considered only if measured lab pressure prevents repeatable experiments.
+
+**Validation:** pin images and source version; retain license notices; measure local CPU/memory; verify storefront and vendor workflows; verify the bilateral maintenance intent and all negative controls; demonstrate at least one allowed abnormal scenario; and compare temporal detection against static policy and edge-frequency baselines.
+
+**Revisit trigger:** reduce or replace an imported service if the full stack exceeds the measured lab budget, cannot run with the required container hardening, or makes 30-repetition experiments unreliable.
+
+### Tenant-agnostic temporal model
+
+**Context:** tenant-name one-hot features couple a checkpoint to demo labels, and scoring only already denied/cross-tenant candidates makes the visible result predominantly rule-based.
+
+**Options considered:** retain tenant one-hot features; train one model per named tenant pair; or use tenant-agnostic service and relationship features with deployment-local calibration.
+
+**Decision:** use tenant-agnostic node features, relational same/cross-tenant and business-intent features, all-flow scoring, and calibrated EWMA risk on top of the existing GConvGRU anomaly score.
+
+**Rationale:** one schema can support arbitrary portal tenants, the model can observe policy-allowed misuse, and accumulated risk makes temporal behaviour visible without adding another learned detector.
+
+**Trade-offs accepted:** a deployment still needs a reviewed benign baseline; newly approved services can cause cold-start alerts; and automated containment requires corroborating facts rather than model score alone.
+
+**Validation:** rename tenants without retraining the schema; test unseen workload IDs; measure allowed-path detection and false positives; use chronological splits; report predictive lead time; and retain deterministic policy-only and edge-frequency comparisons.
+
+**Revisit trigger:** replace GConvGRU only if the corrected model still fails to beat the baseline or demonstrate useful predictive lead time under the richer held-out topology.
+
 ### Deferred items
 
 - Mobile application.
@@ -506,7 +664,7 @@ The 60% milestone is accepted only when the web portal deploys a real bounded wo
 - Billing and subscription workflows.
 - Arbitrary container deployment.
 - Tetragon runtime telemetry.
-- Kafka, Redis, Celery, and microservices.
+- Kafka, Celery, and control-plane microservices. Redis is permitted only where required by the bounded retail cart fixture.
 - Full Euler framework import.
 - LLM-generated incident decisions.
 - Forensic checkpoint recovery.
@@ -518,10 +676,17 @@ These items are reconsidered only after the end-to-end MVP and evaluation datase
 
 | Risk | Validation gate |
 |---|---|
-| The two-tenant graph is too small for a useful temporal model | Compare against edge frequency on held-out scenarios; retain the model only if it improves precision/recall or detection delay |
+| The bounded retail/vendor graph is still too small for useful temporal learning | Compare against edge frequency on held-out scenarios; retain the model claim only if it improves a declared metric or demonstrates useful predictive lead time |
+| The model merely re-labels rule-detected events | Score all resolved allowed and denied flows; separately report allowed-path detections before the first policy denial |
+| Tenant labels leak demo identity into the model | Exclude tenant names/IDs from learned features and pass tenant-renaming and unseen-workload tests |
+| Imported Online Boutique services exceed the local lab budget | Measure the chosen subset under normal and peak load; remove nonessential services before weakening workload resource limits |
+| The Target-inspired narrative is mistaken for an exact reconstruction | Cite primary testimony, state the uncertain historical path, use generic branding, and label every added step as a controlled project scenario |
+| The vendor exception weakens tenant isolation | Require bilateral authorization, exact source/destination/port, policy versioning, audit evidence, and negative cross-tenant controls |
 | Hubble file export adds excessive detection delay | Measure exporter-to-incident latency; switch to Hubble Relay gRPC only if the delay breaks the experiment target |
 | UI migration breaks existing workflows | Migrate one complete tenant/workload vertical slice before replacing the remaining Fluent components |
 | Quarantine exists in storage but not in the datapath | Verify withdrawal of a previously allowed connection and repeat after pod replacement |
 | Policy changes leave established connections active | Test both new and established connections and record the observed Cilium behaviour |
 | Training data accepts attack traffic as normal | Use reviewed benign training periods, immutable dataset manifests, chronological splits, and model-version records |
 | Model dependencies exceed the lab budget | Measure training/inference CPU, memory, and latency before enabling continuous scoring |
+| The demonstrator looks like a scripted attack toy | Keep scenario controls outside the customer portal; show ordinary reference-app use, live Hubble evidence, and independently verified policy outcomes |
+| Imported and SecureCloud-owned services use inconsistent identity labels | Enforce one catalog label contract and reject unresolved workload identity as inconclusive rather than scoring it |
