@@ -1,4 +1,10 @@
-"""Evaluation and Paper Benchmark for SecureCloud Zero Trust Security Framework.
+"""Deprecated compatibility entry point for the reproducible evaluation runner.
+
+The maintained implementation is :mod:`backend.experiments.runner`.
+
+Legacy implementation retained below temporarily for import compatibility.
+
+Evaluation and Paper Benchmark for SecureCloud Zero Trust Security Framework.
 Compares:
 1. Static Policy Only
 2. Static Policy + Edge-Frequency Baseline
@@ -264,6 +270,13 @@ def run_evaluation():
     return results
 
 
+from backend.experiments.runner import (
+    EvaluationConfig,
+    main,
+    run_evaluation,
+)
+
+
 if __name__ == "__main__":
-    run_evaluation()
+    main()
 

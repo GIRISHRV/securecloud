@@ -2,12 +2,14 @@ import secrets
 import pytest
 from fastapi.testclient import TestClient
 from backend.api import Settings, create_app
+from backend.infrastructure.memory import MemoryInfrastructure
 
 
 @pytest.fixture
 def zerotrust_lab(tmp_path):
     settings = Settings(tmp_path / "test.sqlite", origin="http://testserver", secure_cookie=False)
     app = create_app(settings)
+    app.state.store.infrastructure = MemoryInfrastructure()
     admin_pw = secrets.token_urlsafe(24)
     admin_id = app.state.store.create_user("administrator", admin_pw, administrator=True)
 
