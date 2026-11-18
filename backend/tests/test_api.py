@@ -48,6 +48,32 @@ def test_authentication_and_cookie_boundaries(lab):
     assert alice.get("/api/auth/session").status_code == 401
 
 
+def test_authenticated_catalog_exposes_only_bounded_definitions(lab):
+    app, client, admin, tenants = lab
+    anonymous = TestClient(app)
+    assert anonymous.get("/api/catalog").status_code == 401
+
+    catalog = client("alice").get("/api/catalog")
+    assert catalog.status_code == 200
+    payload = catalog.json()
+    assert [item["id"] for item in payload["templates"]] == [
+        "web", "api", "database",
+    ]
+    assert [item["id"] for item in payload["stacks"]] == [
+        "retail-stack", "facilities-vendor-stack",
+    ]
+    retail, vendor = payload["stacks"]
+    assert retail["status"] == "validated"
+    assert retail["deployment_enabled"] is False
+    assert len(retail["services"]) == 12
+    assert vendor["status"] == "planned"
+    assert vendor["deployment_enabled"] is False
+    assert len(vendor["services"]) == 3
+    serialized = catalog.text.casefold()
+    assert '"image"' not in serialized
+    assert '"yaml"' not in serialized
+
+
 def test_cross_tenant_read_and_write_denied(lab):
     app, client, admin, (college, hospital) = lab
     alice = client("alice")
@@ -57,6 +83,47 @@ def test_cross_tenant_read_and_write_denied(lab):
     assert alice.post("/api/tenants", json={"name": "Bypass"}).status_code == 403
     with app.state.store.connect() as db:
         assert db.execute("SELECT count(*) FROM workloads").fetchone()[0] == 0
+
+
+def test_stack_deploy_boundary_is_authorized_allowlisted_and_fail_closed(lab):
+    app, client, admin, (college, hospital) = lab
+    alice = client("alice")
+    request = {"name": "retail-app", "stack": "retail-stack"}
+    headers = {"Idempotency-Key": "retail-stack-request-1"}
+
+    assert alice.post(
+        f"/api/tenants/{hospital}/stacks", json=request, headers=headers
+    ).status_code == 404
+    response = alice.post(
+        f"/api/tenants/{college}/stacks", json=request, headers=headers
+    )
+    assert response.status_code == 503
+    assert alice.post(
+        f"/api/tenants/{college}/stacks",
+        json={**request, "image": "attacker/image:latest"},
+        headers=headers,
+    ).status_code == 422
+    assert alice.post(
+        f"/api/tenants/{college}/stacks",
+        json={"name": "vendor-app", "stack": "facilities-vendor-stack"},
+        headers={"Idempotency-Key": "vendor-stack-request-1"},
+    ).status_code == 409
+    with app.state.store.connect() as db:
+        assert db.execute("SELECT count(*) FROM stack_deployments").fetchone()[0] == 0
+
+
+def test_state_exposes_only_running_management_app_previews(lab):
+    app, client, admin, (college, _) = lab
+    with app.state.store.connect() as db:
+        db.execute(
+            """INSERT INTO workloads
+               (id,tenant_id,name,template,desired,observed,created)
+               VALUES ('college-web',?,'college-web','web','running','running',1)""",
+            (college,),
+        )
+    state = admin.get("/api/state").json()
+    workload = next(item for item in state["workloads"] if item["id"] == "college-web")
+    assert workload["previewUrl"] == "http://127.0.0.1:8091/"
 
 
 def test_telemetry_and_incidents_are_tenant_scoped(lab):
@@ -137,7 +204,10 @@ def test_idempotency_and_pending_state(lab):
     assert deploy(alice, college, name="changed-name").status_code == 409
     workloads = alice.get(f"/api/tenants/{college}/workloads").json()
     assert len(workloads) == 1 and workloads[0]["observed"] == "pending"
-    assert TestClient(create_app(app.state.settings)).get("/api/health").json()["infrastructure"] == "not-connected"
+    assert TestClient(create_app(app.state.settings)).get("/api/health").json()["infrastructure"] == {
+        "connected": False,
+        "provider": "disabled",
+    }
 
 
 def test_exact_name_version_serialization_and_quarantine(lab):
@@ -212,6 +282,8 @@ def test_login_throttle_persists_and_audit_contains_no_secrets(lab):
 
 
 def test_secure_cookie_default_and_host_validation(tmp_path):
+    with pytest.raises(ValueError, match="Infrastructure"):
+        Settings(tmp_path / "invalid.sqlite", infrastructure="docker")
     app = create_app(Settings(tmp_path / "secure.sqlite", origin="https://testserver"))
     password = secrets.token_urlsafe(24)
     app.state.store.create_user("admin", password, True)

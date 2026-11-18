@@ -1,3 +1,6 @@
 fastapi==0.141.1
 uvicorn==0.54.0
 argon2-cffi==25.1.0
+kubernetes==36.0.3
+torch==2.15.0
+torch-geometric==2.8.1
