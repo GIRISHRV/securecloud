@@ -45,9 +45,13 @@ export function Overview({
         onKeyDown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           const buttons = Array.from(
-            event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
+            event.currentTarget.querySelectorAll<HTMLButtonElement>(
+              "button:not(:disabled)",
+            ),
           );
-          const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          const current = buttons.indexOf(
+            document.activeElement as HTMLButtonElement,
+          );
           if (current < 0) return;
           event.preventDefault();
           const step = event.key === "ArrowRight" ? 1 : -1;
@@ -74,24 +78,6 @@ export function Overview({
         >
           <Icon name="box" size={16} />
           Deploy workload
-        </ActionButton>
-        <ActionButton
-          className="button command"
-          onClick={() => navigate("network")}
-          tabIndex={activeCommandIndex === 2 ? 0 : -1}
-          onFocus={() => setActiveCommandIndex(2)}
-        >
-          <Icon name="network" size={16} />
-          Open simulator
-        </ActionButton>
-        <ActionButton
-          className="button command"
-          onClick={() => navigate("incidents")}
-          tabIndex={activeCommandIndex === 3 ? 0 : -1}
-          onFocus={() => setActiveCommandIndex(3)}
-        >
-          <Icon name="shield" size={16} />
-          Incidents
         </ActionButton>
       </div>
       <section className="resource-summary" aria-label="Resource summary">

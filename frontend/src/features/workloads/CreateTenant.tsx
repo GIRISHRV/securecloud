@@ -10,15 +10,16 @@ export function CreateTenant({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const { service, selectTenant } = usePortal();
+  const { service, mode, selectTenant } = usePortal();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const { error, busy, run } = useAction();
   return (
     <Modal title="Create tenant" onClose={onClose}>
       <p className="muted">
-        Organize workloads in a separate tenant workspace. This creates a local
-        simulated tenant.
+        {mode === "api"
+          ? "Create an isolated tenant workspace for approved workloads."
+          : "Organize workloads in a separate local simulated tenant."}
       </p>
       <form
         onSubmit={(e) => {

@@ -1,6 +1,5 @@
 import type {
   DemoState,
-  PortalService,
   Snapshot,
   TemplateId,
   Tenant,
@@ -14,7 +13,8 @@ import type {
  * Demo mode is selected explicitly by PortalContext; API mode never impersonates
  * an administrator or silently presents simulated state as backend state.
  */
-export class ApiPortalService implements PortalService {
+/** @deprecated Use apiPortalService.ts. Kept temporarily for source-history compatibility. */
+export class ApiPortalService {
   private listeners = new Set<() => void>();
   private isOnline = false;
   private initializationError = "";

@@ -4,12 +4,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useAction, usePortal } from "./PortalContext";
 import { Icon, type IconName } from "../components/Icon";
 import { Modal } from "../components/ui";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
+import { Login } from "../features/auth/Login";
 
 const Overview = lazy(() =>
   import("../features/overview/Overview").then((module) => ({
@@ -90,8 +85,22 @@ function getView(): View {
 }
 
 export default function App() {
-  const { data, scopedData, storageWarning, service, tenantId, selectTenant } =
-    usePortal();
+  const { mode, session } = usePortal();
+  if (mode === "api" && session.status !== "signed-in") return <Login />;
+  return <ConsoleApp />;
+}
+
+function ConsoleApp() {
+  const {
+    data,
+    scopedData,
+    storageWarning,
+    service,
+    session,
+    mode,
+    tenantId,
+    selectTenant,
+  } = usePortal();
   const [view, setView] = useState<View>(getView);
   const [clearOpen, setClearOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -147,6 +156,13 @@ export default function App() {
   const foundWorkloads = search
     ? data.workloads.filter((w) => w.name.includes(search)).slice(0, 6)
     : [];
+  const hasWorkspaceData = Boolean(
+    data.tenants.length ||
+    data.workloads.length ||
+    data.traffic.length ||
+    data.incidents.length ||
+    storageWarning,
+  );
   return (
     <div
       className={`app-shell cloud-console ${navHidden ? "navigation-hidden" : ""}`}
@@ -185,100 +201,114 @@ export default function App() {
           <Icon name="shield" size={25} />
           <span>SecureCloud</span>
         </a>
-        <div className="global-search">
-          <label>
-            <Icon name="search" size={17} />
-            <input
-              aria-label="Search resources and services"
-              placeholder="Search resources and services"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setQuery("");
-              }}
-              autoComplete="off"
-            />
-          </label>
-          {search && (
-            <div
-              className="search-results"
-              role="region"
-              aria-label="Search results"
-            >
-              {foundViews.map((v) => (
-                <button key={v.id} onClick={() => navigate(v.id)}>
-                  <Icon name={v.icon} size={17} />
-                  <span>
-                    {v.name}
-                    <small>Service</small>
-                  </span>
-                </button>
-              ))}
-              {foundTenants.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => {
-                    selectTenant(t.id);
-                    navigate("workloads");
-                  }}
-                >
-                  <Icon name="layers" size={17} />
-                  <span>
-                    {t.name}
-                    <small>Tenant</small>
-                  </span>
-                </button>
-              ))}
-              {foundWorkloads.map((w) => (
-                <button
-                  key={w.id}
-                  onClick={() => {
-                    setQuery("");
-                    setInspectId(w.id);
-                  }}
-                >
-                  <Icon name={w.templateId} size={17} />
-                  <span>
-                    {w.name}
-                    <small>
-                      {data.tenants.find((t) => t.id === w.tenantId)?.name}
-                    </small>
-                  </span>
-                </button>
-              ))}
-              {!foundViews.length &&
-                !foundTenants.length &&
-                !foundWorkloads.length && (
-                  <p>No matching resources or services.</p>
-                )}
-            </div>
-          )}
-        </div>
+        {hasWorkspaceData && (
+          <div className="global-search">
+            <label>
+              <Icon name="search" size={17} />
+              <input
+                aria-label="Search resources and services"
+                placeholder="Search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setQuery("");
+                }}
+                autoComplete="off"
+              />
+            </label>
+            {search && (
+              <div
+                className="search-results"
+                role="region"
+                aria-label="Search results"
+              >
+                {foundViews.map((v) => (
+                  <button key={v.id} onClick={() => navigate(v.id)}>
+                    <Icon name={v.icon} size={17} />
+                    <span>
+                      {v.name}
+                      <small>Service</small>
+                    </span>
+                  </button>
+                ))}
+                {foundTenants.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => {
+                      selectTenant(t.id);
+                      navigate("workloads");
+                    }}
+                  >
+                    <Icon name="layers" size={17} />
+                    <span>
+                      {t.name}
+                      <small>Tenant</small>
+                    </span>
+                  </button>
+                ))}
+                {foundWorkloads.map((w) => (
+                  <button
+                    key={w.id}
+                    onClick={() => {
+                      setQuery("");
+                      setInspectId(w.id);
+                    }}
+                  >
+                    <Icon name={w.templateId} size={17} />
+                    <span>
+                      {w.name}
+                      <small>
+                        {data.tenants.find((t) => t.id === w.tenantId)?.name}
+                      </small>
+                    </span>
+                  </button>
+                ))}
+                {!foundViews.length &&
+                  !foundTenants.length &&
+                  !foundWorkloads.length && (
+                    <p>No matching resources or services.</p>
+                  )}
+              </div>
+            )}
+          </div>
+        )}
         <div className="header-tools">
-          <button
-            className="load-demo-button"
-            disabled={busy || data.demoLoaded}
-            onClick={loadDemo}
-          >
-            <Icon name={data.demoLoaded ? "check" : "activity"} size={17} />
-            {data.demoLoaded ? "Demo loaded" : "Load demo"}
-          </button>
-          <DropdownMenu>
-            <DropdownMenuTrigger className="header-settings" aria-label="Settings">
+          {mode === "demo" && !data.demoLoaded && (
+            <button
+              className="load-demo-button"
+              disabled={busy}
+              onClick={loadDemo}
+            >
+              Load demo
+            </button>
+          )}
+          {mode === "demo" && hasWorkspaceData && (
+            <button
+              className="header-settings"
+              aria-label="Clear workspace"
+              title="Clear workspace"
+              onClick={() => setClearOpen(true)}
+            >
               <Icon name="settings" size={19} />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => setClearOpen(true)}>
-                Clear workspace
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <span
-            className="legacy-user"
-            title="Local operator · no authentication"
-          >
-            LO
-          </span>
+            </button>
+          )}
+          {mode === "api" && session.status === "signed-in" ? (
+            <button
+              className="legacy-user"
+              title={`Sign out ${session.user.username}`}
+              aria-label={`Sign out ${session.user.username}`}
+              onClick={() => void run(() => service.logout())}
+            >
+              {session.user.username.slice(0, 2).toUpperCase()}
+            </button>
+          ) : (
+            <span
+              className="legacy-user"
+              title="Local operator · no authentication"
+            >
+              LO
+            </span>
+          )}
         </div>
       </header>
       <aside className="sidebar" id="portal-navigation" hidden={navHidden}>
@@ -303,43 +333,30 @@ export default function App() {
             </div>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="connection-status">
-            <span>Local simulation</span>
-          </div>
-        </div>
       </aside>
       <div className="main-shell">
-        <div className="context-bar">
-          <div className="breadcrumbs">
-            <button onClick={() => navigate("overview")}>Home</button>
-            <Icon name="chevron" size={13} />
-            <span>{current.name}</span>
-          </div>
-          <label className="scope-selector">
-            <Icon name="layers" size={16} />
-            <span className="sr-only">Tenant scope</span>
-            <select
-              aria-label="Tenant scope"
-              value={tenantId}
-              onChange={(e) => selectTenant(e.target.value)}
-            >
-              <option value="">All tenants</option>
-              {data.tenants.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
         <main id="main-content" tabIndex={-1}>
           <div className="page-heading">
-            <div>
-              <h1 tabIndex={-1} ref={heading}>
-                {current.name}
-              </h1>
-            </div>
+            <h1 tabIndex={-1} ref={heading}>
+              {current.name}
+            </h1>
+            {data.tenants.length > 0 && (
+              <label className="scope-selector">
+                <span className="sr-only">Tenant scope</span>
+                <select
+                  aria-label="Tenant scope"
+                  value={tenantId}
+                  onChange={(e) => selectTenant(e.target.value)}
+                >
+                  <option value="">All tenants</option>
+                  {data.tenants.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
           {storageWarning && (
             <p className="warning-note" role="alert">

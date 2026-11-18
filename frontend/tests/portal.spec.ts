@@ -11,8 +11,8 @@ async function openNetwork(page: Page) {
 async function loadDemo(page: Page) {
   await page.getByRole("button", { name: "Load demo", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Demo loaded", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("button", { name: "Load demo", exact: true }),
+  ).toHaveCount(0);
 }
 async function createAlert(page: Page) {
   await loadDemo(page);
@@ -47,6 +47,13 @@ test("starts empty and only loads sample tenants on request", async ({
     "0",
   ]);
   await nav(page, "Catalog").click();
+  const stacks = page.getByRole("table", {
+    name: "Approved application stacks",
+  });
+  await expect(stacks).toBeVisible();
+  await expect(stacks.getByText("Retail application")).toBeVisible();
+  await expect(stacks.getByText("Facilities vendor application")).toBeVisible();
+  await expect(stacks.getByText("Adapter pending")).toHaveCount(2);
   await expect(
     page.getByRole("button", { name: "Deploy web app", exact: true }),
   ).toBeDisabled();
@@ -227,7 +234,7 @@ test("deploys, inspects, stops, deletes and resets local workloads", async ({
   await nav(page, "Tenants & Workloads").click();
   await page.getByLabel("Search workloads").fill("demo-website");
   await page
-    .getByRole("button", { name: "Inspect demo-website", exact: true })
+    .getByRole("button", { name: "demo-website", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toContainText("0.25 vCPU");
   await page
@@ -240,7 +247,7 @@ test("deploys, inspects, stops, deletes and resets local workloads", async ({
   await page.getByRole("button", { name: "Confirm stop" }).click();
   await expect(page.locator("tbody")).toContainText("stopped");
   await page
-    .getByRole("button", { name: "Inspect demo-website", exact: true })
+    .getByRole("button", { name: "demo-website", exact: true })
     .click();
   await page
     .getByRole("button", { name: "Delete workload", exact: true })
@@ -250,8 +257,14 @@ test("deploys, inspects, stops, deletes and resets local workloads", async ({
   await expect(
     page.getByText("No workloads found", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Clear workspace" }).click();
+  await page
+    .getByRole("button", { name: "Clear workspace", exact: true })
+    .click();
+  const dialogOffset = await page.getByRole("dialog").evaluate((dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    return Math.abs(bounds.left + bounds.width / 2 - window.innerWidth / 2);
+  });
+  expect(dialogOffset).toBeLessThan(2);
   await page.getByRole("button", { name: "Clear all local data" }).click();
   await nav(page, "Tenants & Workloads").click();
   await expect(page.locator("tbody tr")).toHaveCount(0);
@@ -260,9 +273,11 @@ test("deploys, inspects, stops, deletes and resets local workloads", async ({
 
 test("supports keyboard navigation, modal dismissal, and exact name protection", async ({
   page,
-  isMobile,
-}) => {
-  test.skip(isMobile, "Physical keyboard workflow is checked on desktop.");
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "mobile",
+    "Physical keyboard workflow is checked on desktop.",
+  );
   await page.keyboard.press("Tab");
   await expect(
     page.getByRole("link", { name: "Skip to content" }),
@@ -298,8 +313,9 @@ test("handles storage corruption and empty tenants without crashing", async ({
   );
   await page.reload();
   await expect(page.getByRole("alert")).toContainText("could not be loaded");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Clear workspace" }).click();
+  await page
+    .getByRole("button", { name: "Clear workspace", exact: true })
+    .click();
   await page.getByRole("button", { name: "Clear all local data" }).click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await page.evaluate(() => {
@@ -333,11 +349,11 @@ test("has accessible views and no page overflow at the target viewport", async (
       await expect(
         page.getByRole("heading", { name: view, exact: true }),
       ).toBeVisible();
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth <= window.innerWidth,
-        ),
-      ).toBe(true);
+      const pageWidth = await page.evaluate(() => ({
+        content: document.documentElement.scrollWidth,
+        viewport: window.innerWidth,
+      }));
+      expect(pageWidth.content).toBeLessThanOrEqual(pageWidth.viewport);
       const results = await new AxeBuilder({ page })
         // Ignore framework focus guards; assert the first real interactive control.
         // Keyboard entry, arrow navigation, and exit are exercised above.
@@ -404,7 +420,9 @@ test("captures the overview and network map without browser errors", async ({
     fullPage: true,
   });
   await nav(page, "Catalog").click();
-  await expect(page.getByRole("table", { name: "Approved templates" })).toBeVisible();
+  await expect(
+    page.getByRole("table", { name: "Approved templates" }),
+  ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("catalog.png"),
     fullPage: true,
@@ -416,7 +434,9 @@ test("captures the overview and network map without browser errors", async ({
     fullPage: true,
   });
   await openNetwork(page);
-  await expect(page.getByRole("heading", { name: "Tenant network topology" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Tenant network topology" }),
+  ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("network.png"),
     fullPage: true,

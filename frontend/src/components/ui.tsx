@@ -1,17 +1,7 @@
 import type { ReactNode } from "react";
 import { Icon } from "./Icon";
 import { ConsoleEmpty } from "./kokonutui/console-empty";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "./ui/card";
-import {
-  Dialog,
-  DialogContent,
-} from "./ui/dialog";
+import { Dialog, DialogContent } from "./ui/dialog";
 
 export function Badge({
   children,
@@ -42,20 +32,16 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <Card className={`panel mb-6 overflow-hidden ${className}`}>
-      <CardHeader className="panel-heading flex flex-row items-center justify-between border-b border-border p-4">
+    <section className={`panel ${className}`}>
+      <header className="panel-heading">
         <div>
-          <CardTitle className="text-base font-semibold">{title}</CardTitle>
-          {description && (
-            <CardDescription className="text-xs text-muted-foreground mt-0.5">
-              {description}
-            </CardDescription>
-          )}
+          <h2>{title}</h2>
+          {description && <p>{description}</p>}
         </div>
         {action}
-      </CardHeader>
-      <CardContent className="p-4">{children}</CardContent>
-    </Card>
+      </header>
+      <div className="panel-content">{children}</div>
+    </section>
   );
 }
 

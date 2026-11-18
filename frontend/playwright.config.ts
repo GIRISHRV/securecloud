@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
+const externalBaseUrl = process.env.SECURECLOUD_E2E_BASE_URL;
+
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
@@ -8,7 +10,7 @@ export default defineConfig({
   expect: { timeout: 7_000 },
   reporter: "list",
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: externalBaseUrl ?? "http://127.0.0.1:4173",
     headless: true,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
@@ -28,14 +30,15 @@ export default defineConfig({
         browserName: "chromium",
         channel: "msedge",
         viewport: { width: 390, height: 844 },
-        isMobile: true,
         hasTouch: true,
       },
     },
   ],
-  webServer: {
-    command: "npm run dev -- --port 4173 --strictPort",
-    url: "http://127.0.0.1:4173",
-    reuseExistingServer: false,
-  },
+  webServer: externalBaseUrl
+    ? undefined
+    : {
+        command: "npm run dev -- --port 4173 --strictPort",
+        url: "http://127.0.0.1:4173",
+        reuseExistingServer: false,
+      },
 });

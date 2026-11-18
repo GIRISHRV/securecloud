@@ -71,9 +71,20 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
         <Topology />
       </Panel>
       <div className="network-bottom">
-        <Panel
-          title="Connection simulator"
-        >
+        <Panel title={service.mode === "api" ? "Live enforcement" : "Connection simulator"}>
+          {service.mode === "api" ? (
+            <div className="live-policy-summary">
+              <strong>Cilium network policy is active</strong>
+              <p>
+                Approved service paths continue to operate. Denied connections
+                shown below are observed Hubble verdicts from the cluster.
+              </p>
+              <p>
+                Controlled security scenarios run outside this portal and cannot
+                target arbitrary systems.
+              </p>
+            </div>
+          ) : (
           <div className="simulator">
             <div className="preset-row">
               <span>Presets</span>
@@ -198,14 +209,23 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
                   <strong>{reasonLabels[result.reason]}</strong>
                   <small>
                     {result.sourceName} → {result.destinationName}:{result.port}{" "}
-                    · Simulated result
+                    · Policy result
                   </small>
                 </div>
               )}
             </div>
           </div>
+          )}
         </Panel>
-        <Panel title="Detection rule">
+        <Panel title={service.mode === "api" ? "Policy controls" : "Detection rule"}>
+          {service.mode === "api" ? (
+            <div className="live-policy-summary">
+              <strong>Default deny</strong>
+              <p>Web workloads can reach only their tenant API on TCP 8080.</p>
+              <p>API workloads can reach only their tenant database on TCP 5432.</p>
+              <p>Cross-tenant workload traffic is denied and retained as evidence.</p>
+            </div>
+          ) : (
           <div className="rule-content">
             <span className="rule-number">
               03 <small>attempts / 60 seconds</small>
@@ -223,10 +243,11 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
               <Icon name="arrow" size={16} />
             </button>
           </div>
+          )}
         </Panel>
       </div>
       <Panel
-        title="Traffic evidence"
+        title={service.mode === "api" ? "Live traffic evidence" : "Traffic evidence"}
       >
         <TrafficTable events={scopedData.traffic.slice(-30).reverse()} />
       </Panel>
