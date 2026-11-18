@@ -1,6 +1,15 @@
 import { z } from "zod";
 
-export const tenantIdSchema = z.string().regex(/^[a-z][a-z0-9-]{2,63}$/);
+export const tenantIdSchema = z
+  .string()
+  .refine(
+    (value) =>
+      /^[a-z][a-z0-9-]{2,63}$/.test(value) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      ),
+    "Invalid tenant identifier",
+  );
 export const templateIdSchema = z.enum(["web", "api", "database"]);
 const text = z.string().min(1).max(250);
 const timestamp = z.number().finite().nonnegative();
@@ -17,14 +26,39 @@ export const templateSchema = z.object({
   memory: z.number().positive(),
   port: z.number().int().positive(),
 });
+export const stackServiceSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9-]{2,39}$/),
+  template: templateIdSchema,
+  port: z.number().int().positive().nullable(),
+  dependencies: z.array(z.string().min(1)).max(20),
+});
+export const stackDefinitionSchema = z.object({
+  id: z.enum(["retail-stack", "facilities-vendor-stack"]),
+  name: text,
+  description: text,
+  version: z.string().min(1).max(80),
+  status: z.enum(["validated", "planned"]),
+  deployment_enabled: z.boolean(),
+  workflow: text,
+  services: z.array(stackServiceSchema).min(1).max(20),
+});
+export const catalogSchema = z.object({
+  templates: z.array(templateSchema).length(3),
+  stacks: z.array(stackDefinitionSchema).length(2),
+});
 export const workloadSchema = z.object({
   id: text,
   tenantId: tenantIdSchema,
   templateId: templateIdSchema,
   name: z.string().regex(/^[a-z][a-z0-9-]{2,39}$/),
-  status: z.enum(["running", "stopped"]),
+  status: z.enum(["pending", "running", "stopped", "unknown"]),
   quarantined: z.boolean(),
   createdAt: timestamp,
+  desired: z.enum(["running", "stopped", "deleted"]).optional(),
+  version: z.number().int().positive().optional(),
+  kubernetesUid: z.string().min(1).nullish(),
+  kubernetesVersion: z.string().min(1).nullish(),
+  previewUrl: z.string().url().nullish(),
 });
 export const intentSchema = z.object({
   id: text,
@@ -65,9 +99,9 @@ export const incidentSchema = z.object({
   status: z.enum(["alert", "quarantined", "review", "restored"]),
   reason: text,
   createdAt: timestamp,
-  restoredAt: timestamp.optional(),
+  restoredAt: timestamp.nullish(),
   resetAfterEventId: text.optional(),
-  evidence: z.array(trafficSchema).min(3).max(1000),
+  evidence: z.array(trafficSchema).min(1).max(1000),
   trace: z.array(traceSchema).max(200),
 });
 export const stateSchema = z.object({
@@ -83,6 +117,9 @@ export type TenantId = z.infer<typeof tenantIdSchema>;
 export type TemplateId = z.infer<typeof templateIdSchema>;
 export type Tenant = z.infer<typeof tenantSchema>;
 export type WorkloadTemplate = z.infer<typeof templateSchema>;
+export type StackDefinition = z.infer<typeof stackDefinitionSchema>;
+export type StackId = StackDefinition["id"];
+export type CatalogDefinition = z.infer<typeof catalogSchema>;
 export type Workload = z.infer<typeof workloadSchema>;
 export type ConnectionIntent = z.infer<typeof intentSchema>;
 export type TrafficEvent = z.infer<typeof trafficSchema>;
@@ -91,11 +128,30 @@ export type Incident = z.infer<typeof incidentSchema>;
 export type DemoState = z.infer<typeof stateSchema>;
 export type Snapshot = { data: DemoState; storageWarning: string | null };
 
+export type PortalMode = "demo" | "api";
+export type PortalSession =
+  | { status: "connecting"; user: null }
+  | { status: "signed-out"; user: null }
+  | {
+      status: "signed-in";
+      user: { id: string; username: string; administrator: boolean };
+    };
+
 export interface PortalService {
+  readonly mode: PortalMode;
   subscribe(listener: () => void): () => void;
   getSnapshot(): Snapshot;
+  getSession(): PortalSession;
+  login(username: string, password: string): Promise<void>;
+  logout(): Promise<void>;
   reset(): Promise<void>;
   loadDemo(): Promise<void>;
+  getCatalog(): Promise<CatalogDefinition>;
+  deployStack(
+    tenantId: TenantId,
+    stackId: StackId,
+    name: string,
+  ): Promise<void>;
   createTenant(name: string, description: string): Promise<Tenant>;
   deploy(
     tenantId: TenantId,

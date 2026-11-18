@@ -7,7 +7,7 @@ import {
 } from "react";
 import type { PortalService } from "../domain/models";
 import { MockPortalService } from "../services/mockService";
-import { ApiPortalService } from "../services/apiService";
+import { ApiPortalService } from "../services/apiPortalService";
 const Context = createContext<{
   service: PortalService;
   tenantId: string;
@@ -42,6 +42,7 @@ export function usePortal() {
   if (!context) throw new Error("PortalProvider missing");
   const { service, selectTenant } = context;
   const snapshot = useSyncExternalStore(service.subscribe, service.getSnapshot);
+  const session = useSyncExternalStore(service.subscribe, service.getSession);
   const tenantId = snapshot.data.tenants.some((t) => t.id === context.tenantId)
     ? context.tenantId
     : "";
@@ -60,7 +61,15 @@ export function usePortal() {
           (i) => i.tenantId === tenantId,
         ),
       };
-  return { ...snapshot, service, scopedData, tenantId, selectTenant };
+  return {
+    ...snapshot,
+    service,
+    session,
+    mode: service.mode,
+    scopedData,
+    tenantId,
+    selectTenant,
+  };
 }
 export function useAction() {
   const [error, setError] = useState("");

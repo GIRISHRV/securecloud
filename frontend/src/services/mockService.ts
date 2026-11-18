@@ -6,15 +6,22 @@ import {
   workloadSchema,
 } from "../domain/models";
 import type {
+  CatalogDefinition,
   DemoState,
   Incident,
   PortalService,
+  PortalSession,
   Snapshot,
+  StackId,
   TenantId,
   TemplateId,
   Workload,
 } from "../domain/models";
-import { createEmptyWorkspace, createSeed } from "../domain/seed";
+import {
+  catalogDefinition,
+  createEmptyWorkspace,
+  createSeed,
+} from "../domain/seed";
 import {
   decide,
   DENIAL_THRESHOLD,
@@ -89,10 +96,19 @@ function validRelations(data: DemoState) {
 }
 
 export class MockPortalService implements PortalService {
+  readonly mode = "demo" as const;
   private snapshot: Snapshot;
   private listeners = new Set<() => void>();
   private storage?: StorageAdapter;
   private clock: () => number;
+  private readonly localSession: PortalSession = {
+    status: "signed-in",
+    user: {
+      id: "local-operator",
+      username: "Local operator",
+      administrator: true,
+    },
+  };
 
   constructor(storage?: StorageAdapter, clock = Date.now) {
     this.storage = storage;
@@ -120,12 +136,29 @@ export class MockPortalService implements PortalService {
   }
 
   getSnapshot = () => this.snapshot;
+  getSession = () => this.localSession;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
   };
+
+  async login(): Promise<void> {}
+
+  async getCatalog(): Promise<CatalogDefinition> {
+    return structuredClone(catalogDefinition);
+  }
+
+  async deployStack(
+    _tenantId: TenantId,
+    _stackId: StackId,
+    _name: string,
+  ): Promise<void> {
+    throw new Error("Composite deployment is available only in API mode");
+  }
+
+  async logout(): Promise<void> {}
 
   private commit(data: DemoState) {
     let warning: string | null = null;

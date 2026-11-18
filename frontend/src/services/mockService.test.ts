@@ -380,4 +380,14 @@ describe("empty workspace and dynamic tenants", () => {
     await expect(service.loadDemo()).rejects.toThrow("already in use");
     expect(data()).toBe(before);
   });
+  it("returns fresh bounded composite catalog definitions", async () => {
+    const first = await service.getCatalog();
+    expect(first.stacks.map((stack) => stack.id)).toEqual([
+      "retail-stack",
+      "facilities-vendor-stack",
+    ]);
+    expect(first.stacks[0].services).toHaveLength(12);
+    first.stacks[0].services.length = 0;
+    expect((await service.getCatalog()).stacks[0].services).toHaveLength(12);
+  });
 });

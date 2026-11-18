@@ -10,20 +10,20 @@ export function TrafficTable({
   events: TrafficEvent[];
   compact?: boolean;
 }) {
-  const { data } = usePortal();
+  const { data, service } = usePortal();
   const tenantName = (id: string) =>
     data.tenants.find((t) => t.id === id)?.name ?? id;
   if (!events.length)
     return (
-      <Empty title="No simulated traffic yet">
-        Send a connection from the Network Map to see its policy decision here.
+      <Empty title={service.mode === "api" ? "No policy evidence yet" : "No traffic yet"}>
+        No policy evidence has been collected yet.
       </Empty>
     );
   return (
     <div
       className="table-scroll"
       role="region"
-      aria-label="Simulated traffic events"
+      aria-label={service.mode === "api" ? "Live traffic events" : "Traffic events"}
       tabIndex={0}
     >
       <table className="traffic-table">

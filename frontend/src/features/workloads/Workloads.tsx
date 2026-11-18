@@ -7,11 +7,17 @@ import type { Workload } from "../../domain/models";
 import { templates } from "../../domain/seed";
 
 export function WorkloadBadge({ workload }: { workload: Workload }) {
+  const tone =
+    workload.status === "running"
+      ? "green"
+      : workload.status === "pending"
+        ? "blue"
+        : workload.status === "unknown"
+          ? "amber"
+          : "neutral";
   return (
     <div className="status-group">
-      <Badge tone={workload.status === "running" ? "green" : "neutral"}>
-        {workload.status}
-      </Badge>
+      <Badge tone={tone}>{workload.status}</Badge>
       {workload.quarantined && <Badge tone="red">quarantined</Badge>}
     </div>
   );
@@ -23,7 +29,7 @@ export function WorkloadInspector({
   id: string;
   onClose: () => void;
 }) {
-  const { data, service } = usePortal();
+  const { data, service, mode } = usePortal();
   const workload = data.workloads.find((w) => w.id === id);
   const [action, setAction] = useState<"stop" | "delete" | null>(null);
   const [confirmation, setConfirmation] = useState("");
@@ -68,14 +74,45 @@ export function WorkloadInspector({
               <dd>Default deny + tenant intents</dd>
             </div>
             <div className="full">
-              <dt>Demo workload ID</dt>
+              <dt>Workload ID</dt>
               <dd className="mono">{workload.id}</dd>
             </div>
+            {mode === "api" && (
+              <>
+                <div>
+                  <dt>Desired state</dt>
+                  <dd>{workload.desired ?? "unknown"}</dd>
+                </div>
+                <div>
+                  <dt>Observed state</dt>
+                  <dd>{workload.status}</dd>
+                </div>
+                <div className="full">
+                  <dt>Kubernetes UID</dt>
+                  <dd className="mono">
+                    {workload.kubernetesUid ?? "Not observed"}
+                  </dd>
+                </div>
+              </>
+            )}
           </dl>
-          <p className="info-note">
-            This is a browser simulation. No container or cloud resource has
-            been provisioned.
-          </p>
+          {mode === "demo" && (
+            <p className="info-note">
+              This is a browser simulation. No container or cloud resource has
+              been provisioned.
+            </p>
+          )}
+          {mode === "api" && workload.previewUrl && (
+            <a
+              className="button primary"
+              href={workload.previewUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open application
+              <Icon name="arrow" size={16} />
+            </a>
+          )}
           {active && (
             <p className="warning-note">
               An active incident prevents deletion. Complete quarantine, review,
@@ -130,7 +167,7 @@ export function WorkloadInspector({
         <div className="modal-actions">
           <ActionButton
             className="button"
-            disabled={workload.status === "stopped"}
+            disabled={workload.status !== "running"}
             onClick={() => setAction("stop")}
           >
             <Icon name="stop" size={16} />
@@ -295,14 +332,26 @@ export function Workloads({
                         {template.cpu} vCPU <span>·</span> {template.memory} MiB
                       </td>
                       <td>
-                        <ActionButton
-                          className="button compact"
-                          onClick={() => setSelected(w.id)}
-                          aria-label={`Inspect ${w.name}`}
-                        >
-                          Inspect
-                          <Icon name="chevron" size={14} />
-                        </ActionButton>
+                        <div className="table-actions">
+                          {w.previewUrl && (
+                            <a
+                              className="button compact primary"
+                              href={w.previewUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open app
+                            </a>
+                          )}
+                          <ActionButton
+                            className="button compact"
+                            onClick={() => setSelected(w.id)}
+                            aria-label={`Inspect ${w.name}`}
+                          >
+                            Inspect
+                            <Icon name="chevron" size={14} />
+                          </ActionButton>
+                        </div>
                       </td>
                     </tr>
                   );
