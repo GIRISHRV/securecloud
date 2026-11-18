@@ -1,34 +1,5 @@
 {
-  "dataset_summary": {
-    "total_events": 1500,
-    "benign_events": 1200,
-    "malicious_events": 300
-  },
-  "configurations": {
-    "static_policy_only": {
-      "prevention_rate": 0.98,
-      "dynamic_containment": false,
-      "precision": 1.0,
-      "recall": 0.98,
-      "note": "Blocks static policy violations but lacks lateral threat detection and adaptive quarantine."
-    },
-    "edge_frequency_baseline": {
-      "prevention_rate": 1.0,
-      "dynamic_containment": true,
-      "precision": 0.3731,
-      "recall": 0.99,
-      "f1_score": 0.542,
-      "false_positive_rate": 0.4158,
-      "avg_containment_delay_events": 4.0
-    },
-    "denial_burst_baseline": {
-      "prevention_rate": 1.0,
-      "dynamic_containment": true,
-      "precision": 0.3739,
-      "recall": 0.9933,
-      "f1_score": 0.5433,
-      "false_positive_rate": 0.4158,
-      "avg_containment_delay_events": 3.0
-    }
-  }
+  "deprecated": true,
+  "reason": "This single-seed result used invalid detector substitutions and must not be cited.",
+  "replacement": "Run python -m backend.experiments.runner; generated artifacts are written under runtime/experiments/offline."
 }
