@@ -6,6 +6,20 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .infrastructure import (
+    InfrastructureAdapter,
+    InfrastructureConflict,
+    InfrastructureError,
+    InfrastructurePending,
+    InfrastructureUnavailable,
+    StackObservation,
+    StackRequest,
+    WorkloadRequest,
+)
+from .telemetry.schema import NormalizedFlow, WorkloadIdentity
+
+REFERENCE_LAB_REVISION = "0.2.0"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
@@ -25,13 +39,21 @@ CREATE TABLE IF NOT EXISTS memberships (
  tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id),
  role TEXT NOT NULL CHECK(role IN ('viewer','operator','admin')), PRIMARY KEY(tenant_id,user_id)
 );
+CREATE TABLE IF NOT EXISTS stack_deployments (
+ id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+ name TEXT NOT NULL, stack_id TEXT NOT NULL,
+ desired TEXT NOT NULL CHECK(desired IN ('running','deleted')),
+ observed TEXT NOT NULL DEFAULT 'pending', version INTEGER NOT NULL DEFAULT 1,
+ created REAL NOT NULL, UNIQUE(tenant_id,name), UNIQUE(tenant_id,stack_id)
+);
 CREATE TABLE IF NOT EXISTS workloads (
  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL,
  template TEXT NOT NULL CHECK(template IN ('web','api','database')),
  desired TEXT NOT NULL CHECK(desired IN ('running','stopped','deleted')),
  observed TEXT NOT NULL DEFAULT 'pending', quarantined INTEGER NOT NULL DEFAULT 0,
  version INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL,
- kubernetes_uid TEXT, kubernetes_version TEXT, UNIQUE(tenant_id,name)
+ kubernetes_uid TEXT, kubernetes_version TEXT, stack_deployment_id TEXT,
+ UNIQUE(tenant_id,name)
 );
 CREATE TABLE IF NOT EXISTS operations (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -42,6 +64,17 @@ CREATE TABLE IF NOT EXISTS operations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_operation ON operations(workload_id)
  WHERE status IN ('queued','running');
+CREATE TABLE IF NOT EXISTS stack_operations (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ tenant_id TEXT NOT NULL REFERENCES tenants(id),
+ stack_deployment_id TEXT NOT NULL REFERENCES stack_deployments(id),
+ action TEXT NOT NULL CHECK(action IN ('deploy')),
+ status TEXT NOT NULL DEFAULT 'queued', idempotency_key TEXT NOT NULL,
+ fingerprint TEXT NOT NULL, created REAL NOT NULL, error TEXT,
+ UNIQUE(user_id,idempotency_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_stack_operation
+ ON stack_operations(stack_deployment_id) WHERE status IN ('queued','running');
 CREATE TABLE IF NOT EXISTS audit (
  id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT,
  tenant_id TEXT, action TEXT NOT NULL, resource TEXT, outcome TEXT NOT NULL
@@ -71,15 +104,52 @@ CREATE TABLE IF NOT EXISTS incidents (
  evidence_json TEXT NOT NULL,
  trace_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS containment_requests (
+ incident_id TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
+ action TEXT NOT NULL CHECK(action IN ('quarantine','restore')),
+ status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','inconclusive')),
+ requested_by TEXT NOT NULL, requested_at REAL NOT NULL, completed_at REAL,
+ error TEXT, policy_uid TEXT, policy_version TEXT
+);
+CREATE TABLE IF NOT EXISTS normalized_flows (
+ event_id TEXT PRIMARY KEY, observed_at REAL NOT NULL,
+ source_tenant TEXT, source_workload TEXT, source_name TEXT,
+ destination_tenant TEXT, destination_workload TEXT, destination_name TEXT,
+ identity_status TEXT NOT NULL CHECK(identity_status IN ('resolved','unmapped')),
+ verdict TEXT NOT NULL CHECK(verdict IN ('forwarded','dropped','audit','unknown')),
+ drop_reason TEXT, protocol TEXT, destination_port INTEGER, node_name TEXT
+);
+CREATE INDEX IF NOT EXISTS normalized_flows_time ON normalized_flows(observed_at);
+CREATE TABLE IF NOT EXISTS detection_findings (
+ id TEXT PRIMARY KEY,
+ incident_id TEXT NOT NULL UNIQUE REFERENCES incidents(id),
+ model_version TEXT NOT NULL,
+ window_start REAL NOT NULL,
+ window_end REAL NOT NULL,
+ source_id TEXT NOT NULL,
+ destination_id TEXT NOT NULL,
+ predicted_probability REAL NOT NULL,
+ anomaly_score REAL NOT NULL,
+ threshold REAL NOT NULL,
+ supporting_facts_json TEXT NOT NULL,
+ event_ids_json TEXT NOT NULL,
+ created_at REAL NOT NULL
+);
 """
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, infrastructure: InfrastructureAdapter | None = None):
         self.path = path
+        self.infrastructure = infrastructure
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript(SCHEMA)
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(workloads)")
+            }
+            if "stack_deployment_id" not in columns:
+                db.execute("ALTER TABLE workloads ADD COLUMN stack_deployment_id TEXT")
 
     @contextmanager
     def connect(self):
@@ -112,30 +182,353 @@ class Store:
         return user_id
 
     def reconcile_operations(self):
-        """Synchronously reconcile pending/queued operations for local simulation/MVP."""
+        """Reconcile persisted intent without inferring success from a request."""
         with self.connect() as db:
             rows = db.execute("SELECT * FROM operations WHERE status IN ('queued', 'running') ORDER BY created").fetchall()
-            for op in rows:
-                action = op["action"]
-                workload_id = op["workload_id"]
-                workload = db.execute("SELECT * FROM workloads WHERE id=?", (workload_id,)).fetchone()
-                if not workload:
-                    db.execute("UPDATE operations SET status='failed', error='Workload disappeared' WHERE id=?", (op["id"],))
-                    continue
+            operation_ids = [row["id"] for row in rows]
+            for operation_id in operation_ids:
+                db.execute("UPDATE operations SET status='running', error=NULL WHERE id=? AND status='queued'", (operation_id,))
 
-                if action == "deploy":
-                    k8s_uid = f"k8s-pod-{uuid.uuid4().hex[:12]}"
-                    k8s_ver = "v1.28-demo"
-                    db.execute("UPDATE workloads SET observed='running', kubernetes_uid=?, kubernetes_version=? WHERE id=?",
-                               (k8s_uid, k8s_ver, workload_id))
-                    db.execute("UPDATE operations SET status='succeeded' WHERE id=?", (op["id"],))
-                elif action == "stop":
-                    db.execute("UPDATE workloads SET observed='stopped' WHERE id=?", (workload_id,))
-                    db.execute("UPDATE operations SET status='succeeded' WHERE id=?", (op["id"],))
-                elif action == "delete":
-                    db.execute("UPDATE workloads SET observed='deleted' WHERE id=?", (workload_id,))
-                    db.execute("UPDATE operations SET status='succeeded' WHERE id=?", (op["id"],))
-                audit(db, op["user_id"], op["tenant_id"], f"workload.{action}.reconciled", workload_id)
+        for operation_id in operation_ids:
+            with self.connect() as db:
+                op = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+                workload = db.execute("SELECT * FROM workloads WHERE id=?", (op["workload_id"],)).fetchone() if op else None
+            if not op or op["status"] not in {"queued", "running"}:
+                continue
+            if not workload:
+                self._finish_operation(op, "failed", "Workload disappeared")
+                continue
+            if self.infrastructure is None:
+                self._finish_operation(op, "inconclusive", "Kubernetes infrastructure is not configured", observed="unknown")
+                continue
+
+            try:
+                observation = self.infrastructure.reconcile(op["action"], WorkloadRequest.from_mapping(workload))
+            except InfrastructurePending as exc:
+                if exc.observation is not None:
+                    with self.connect() as db:
+                        db.execute(
+                            "UPDATE workloads SET observed=?, kubernetes_uid=?, kubernetes_version=? WHERE id=?",
+                            (
+                                exc.observation.state,
+                                exc.observation.uid,
+                                exc.observation.resource_version,
+                                op["workload_id"],
+                            ),
+                        )
+                continue
+            except InfrastructureUnavailable as exc:
+                self._finish_operation(op, "inconclusive", str(exc), observed="unknown")
+            except (InfrastructureConflict, InfrastructureError) as exc:
+                self._finish_operation(op, "failed", str(exc))
+            else:
+                self._finish_operation(
+                    op,
+                    "succeeded",
+                    None,
+                    observed=observation.state,
+                    uid=observation.uid,
+                    resource_version=observation.resource_version,
+                )
+
+    def reconcile_stack_operations(self):
+        """Reconcile one fixed composite stack as a serialized persisted operation."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM stack_operations "
+                "WHERE status IN ('queued','running') ORDER BY created"
+            ).fetchall()
+            operation_ids = [row["id"] for row in rows]
+            for operation_id in operation_ids:
+                db.execute(
+                    "UPDATE stack_operations SET status='running',error=NULL "
+                    "WHERE id=? AND status='queued'",
+                    (operation_id,),
+                )
+
+        for operation_id in operation_ids:
+            with self.connect() as db:
+                operation = db.execute(
+                    "SELECT * FROM stack_operations WHERE id=?", (operation_id,)
+                ).fetchone()
+                stack = (
+                    db.execute(
+                        "SELECT * FROM stack_deployments WHERE id=?",
+                        (operation["stack_deployment_id"],),
+                    ).fetchone()
+                    if operation
+                    else None
+                )
+                component_rows = (
+                    db.execute(
+                        "SELECT * FROM workloads WHERE stack_deployment_id=? "
+                        "ORDER BY name",
+                        (stack["id"],),
+                    ).fetchall()
+                    if stack
+                    else []
+                )
+            if not operation or operation["status"] not in {"queued", "running"}:
+                continue
+            if not stack or not component_rows:
+                self._finish_stack_operation(
+                    operation, "failed", "Stack deployment disappeared"
+                )
+                continue
+            if self.infrastructure is None:
+                self._finish_stack_operation(
+                    operation,
+                    "inconclusive",
+                    "Kubernetes infrastructure is not configured",
+                    observed="unknown",
+                )
+                continue
+
+            request = StackRequest.from_mapping(stack)
+            components = {
+                row["name"]: WorkloadRequest.from_mapping(row)
+                for row in component_rows
+            }
+            try:
+                observation = self.infrastructure.reconcile_stack(
+                    operation["action"], request, components
+                )
+            except InfrastructurePending as exc:
+                if isinstance(exc.observation, StackObservation):
+                    self._record_stack_observation(stack["id"], exc.observation)
+                continue
+            except InfrastructureUnavailable as exc:
+                self._finish_stack_operation(
+                    operation, "inconclusive", str(exc), observed="unknown"
+                )
+            except (InfrastructureConflict, InfrastructureError) as exc:
+                self._finish_stack_operation(operation, "failed", str(exc))
+            else:
+                self._record_stack_observation(stack["id"], observation)
+                self._finish_stack_operation(
+                    operation, "succeeded", None, observed=observation.state
+                )
+
+    def _record_stack_observation(
+        self, deployment_id: str, observation: StackObservation
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE stack_deployments SET observed=? WHERE id=?",
+                (observation.state, deployment_id),
+            )
+            for name, component in observation.components.items():
+                db.execute(
+                    """UPDATE workloads
+                       SET observed=?,kubernetes_uid=?,kubernetes_version=?
+                       WHERE stack_deployment_id=? AND name=?""",
+                    (
+                        component.state,
+                        component.uid,
+                        component.resource_version,
+                        deployment_id,
+                        name,
+                    ),
+                )
+
+    def _finish_stack_operation(
+        self,
+        operation,
+        status: str,
+        error: str | None,
+        *,
+        observed: str | None = None,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE stack_operations SET status=?,error=? WHERE id=?",
+                (status, error, operation["id"]),
+            )
+            if observed is not None:
+                db.execute(
+                    "UPDATE stack_deployments SET observed=? WHERE id=?",
+                    (observed, operation["stack_deployment_id"]),
+                )
+                if status != "succeeded":
+                    db.execute(
+                        "UPDATE workloads SET observed=? WHERE stack_deployment_id=?",
+                        (observed, operation["stack_deployment_id"]),
+                    )
+            audit(
+                db,
+                operation["user_id"],
+                operation["tenant_id"],
+                f"stack.{operation['action']}.reconciled",
+                operation["stack_deployment_id"],
+                outcome=status,
+            )
+
+    def request_containment(self, incident_id: str, action: str, actor: str) -> dict:
+        if action not in {"quarantine", "restore"}:
+            raise ValueError("Unsupported containment action")
+        with self.connect() as db:
+            incident = db.execute(
+                "SELECT * FROM incidents WHERE id=?", (incident_id,)
+            ).fetchone()
+            if not incident:
+                raise ValueError("Incident not found")
+            workload = db.execute(
+                "SELECT id FROM workloads WHERE id=? AND tenant_id=?",
+                (incident["source_id"], incident["tenant_id"]),
+            ).fetchone()
+            if not workload:
+                raise ValueError("Incident source workload not found")
+            if action == "quarantine" and incident["status"] not in {"alert", "quarantined"}:
+                raise ValueError("Only an active alert can be quarantined")
+            if action == "restore" and incident["status"] != "review":
+                raise ValueError("Complete incident review before restore")
+            now = time.time()
+            db.execute(
+                """INSERT INTO containment_requests
+                   (incident_id,action,status,requested_by,requested_at,completed_at,error,policy_uid,policy_version)
+                   VALUES(?,?,'queued',?,?,NULL,NULL,NULL,NULL)
+                   ON CONFLICT(incident_id) DO UPDATE SET
+                    action=excluded.action,status='queued',requested_by=excluded.requested_by,
+                    requested_at=excluded.requested_at,completed_at=NULL,error=NULL,
+                    policy_uid=NULL,policy_version=NULL""",
+                (incident_id, action, actor, now),
+            )
+            audit(
+                db,
+                actor,
+                incident["tenant_id"],
+                f"containment.{action}.requested",
+                incident["source_id"],
+                outcome="queued",
+            )
+        return self.get_containment_request(incident_id)
+
+    def get_containment_request(self, incident_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM containment_requests WHERE incident_id=?", (incident_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def reconcile_containment_requests(self):
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT c.*, i.source_id, i.source_name, i.tenant_id,
+                          w.name AS workload_name,w.template,w.kubernetes_uid,w.kubernetes_version
+                   FROM containment_requests c
+                   JOIN incidents i ON i.id=c.incident_id
+                   JOIN workloads w ON w.id=i.source_id
+                   WHERE c.status IN ('queued','running','inconclusive')
+                   ORDER BY c.requested_at"""
+            ).fetchall()
+            ids = [row["incident_id"] for row in rows]
+            for incident_id in ids:
+                db.execute(
+                    "UPDATE containment_requests SET status='running',error=NULL WHERE incident_id=?",
+                    (incident_id,),
+                )
+
+        for item in rows:
+            if self.infrastructure is None:
+                self._finish_containment(item, "inconclusive", "Kubernetes infrastructure is not configured")
+                continue
+            request = WorkloadRequest(
+                item["source_id"], item["tenant_id"], item["workload_name"],
+                item["template"], item["kubernetes_uid"], item["kubernetes_version"],
+            )
+            try:
+                observation = self.infrastructure.reconcile_quarantine(
+                    request, item["action"] == "quarantine"
+                )
+            except (InfrastructurePending, InfrastructureUnavailable) as exc:
+                self._finish_containment(item, "inconclusive", str(exc))
+            except (InfrastructureConflict, InfrastructureError) as exc:
+                self._finish_containment(item, "failed", str(exc))
+            else:
+                self._finish_containment(
+                    item,
+                    "succeeded",
+                    None,
+                    observation.policy_uid,
+                    observation.resource_version,
+                )
+
+    def _finish_containment(
+        self, item, status: str, error: str | None,
+        policy_uid: str | None = None, policy_version: str | None = None,
+    ):
+        with self.connect() as db:
+            current = db.execute(
+                "SELECT * FROM containment_requests WHERE incident_id=?",
+                (item["incident_id"],),
+            ).fetchone()
+            if not current or current["action"] != item["action"]:
+                return
+            completed = time.time() if status == "succeeded" else None
+            db.execute(
+                """UPDATE containment_requests
+                   SET status=?,completed_at=?,error=?,policy_uid=?,policy_version=?
+                   WHERE incident_id=?""",
+                (status, completed, error, policy_uid, policy_version, item["incident_id"]),
+            )
+            if status == "succeeded":
+                incident = db.execute(
+                    "SELECT * FROM incidents WHERE id=?", (item["incident_id"],)
+                ).fetchone()
+                traces = json.loads(incident["trace_json"])
+                new_status = "quarantined" if item["action"] == "quarantine" else "restored"
+                detail = (
+                    "Cilium ingress and egress deny policy was observed for this workload."
+                    if item["action"] == "quarantine"
+                    else "The Cilium quarantine policy was removed and the approved tenant policies were reconciled."
+                )
+                traces.append({
+                    "at": completed,
+                    "title": f"Response: {new_status}",
+                    "detail": detail,
+                })
+                db.execute(
+                    "UPDATE incidents SET status=?,restored_at=?,trace_json=? WHERE id=?",
+                    (
+                        new_status,
+                        completed if new_status == "restored" else incident["restored_at"],
+                        json.dumps(traces),
+                        item["incident_id"],
+                    ),
+                )
+                db.execute(
+                    "UPDATE workloads SET quarantined=? WHERE id=?",
+                    (int(item["action"] == "quarantine"), item["source_id"]),
+                )
+            audit(
+                db,
+                item["requested_by"],
+                item["tenant_id"],
+                f"containment.{item['action']}.reconciled",
+                item["source_id"],
+                outcome=status,
+            )
+
+    def _finish_operation(self, op, status: str, error: str | None, observed: str | None = None,
+                          uid: str | None = None, resource_version: str | None = None):
+        with self.connect() as db:
+            db.execute("UPDATE operations SET status=?, error=? WHERE id=?", (status, error, op["id"]))
+            if observed is not None:
+                if status == "succeeded":
+                    db.execute(
+                        "UPDATE workloads SET observed=?, kubernetes_uid=?, kubernetes_version=? WHERE id=?",
+                        (observed, uid, resource_version, op["workload_id"]),
+                    )
+                else:
+                    db.execute("UPDATE workloads SET observed=? WHERE id=?", (observed, op["workload_id"]))
+            audit(
+                db,
+                op["user_id"],
+                op["tenant_id"],
+                f"workload.{op['action']}.reconciled",
+                op["workload_id"],
+                outcome=status,
+            )
 
     def record_traffic(self, event: dict):
         with self.connect() as db:
@@ -150,6 +543,267 @@ class Store:
                     event["destinationTenant"], event["port"], event["decision"], event["reason"]
                 )
             )
+
+    def workload_identities(self) -> list[WorkloadIdentity]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT tenant_id,id,name FROM workloads ORDER BY tenant_id,id",
+            ).fetchall()
+        return [
+            WorkloadIdentity(row["tenant_id"], row["id"], row["name"])
+            for row in rows
+        ]
+
+    def detection_workloads(self) -> list[dict]:
+        """Return bounded model features; no infrastructure credentials are exposed."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT id,tenant_id,template,desired,observed,quarantined
+                   FROM workloads WHERE desired!='deleted' ORDER BY tenant_id,id""",
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "tenant_id": row["tenant_id"],
+                "template": row["template"],
+                "running": row["desired"] == "running" and row["observed"] == "running",
+                "quarantined": bool(row["quarantined"]),
+            }
+            for row in rows
+        ]
+
+    def ingest_normalized_flows(self, flows: list[NormalizedFlow]) -> int:
+        inserted = 0
+        with self.connect() as db:
+            for flow in flows:
+                result = db.execute(
+                    """INSERT OR IGNORE INTO normalized_flows
+                       (event_id,observed_at,source_tenant,source_workload,source_name,
+                        destination_tenant,destination_workload,destination_name,
+                        identity_status,verdict,drop_reason,protocol,destination_port,node_name)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        flow.event_id,
+                        flow.observed_at,
+                        flow.source.tenant_id if flow.source else None,
+                        flow.source.workload_id if flow.source else None,
+                        flow.source.workload_name if flow.source else None,
+                        flow.destination.tenant_id if flow.destination else None,
+                        flow.destination.workload_id if flow.destination else None,
+                        flow.destination.workload_name if flow.destination else None,
+                        flow.identity_status,
+                        flow.verdict,
+                        flow.drop_reason,
+                        flow.protocol,
+                        flow.destination_port,
+                        flow.node_name,
+                    ),
+                )
+                inserted += result.rowcount
+        return inserted
+
+    def get_normalized_flows(
+        self,
+        *,
+        start: float | None = None,
+        end: float | None = None,
+        limit: int = 100_000,
+    ) -> list[NormalizedFlow]:
+        if limit <= 0 or limit > 1_000_000:
+            raise ValueError("Invalid telemetry query limit")
+        clauses: list[str] = []
+        parameters: list[float | int] = []
+        if start is not None:
+            clauses.append("observed_at>=?")
+            parameters.append(start)
+        if end is not None:
+            clauses.append("observed_at<?")
+            parameters.append(end)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM normalized_flows {where} ORDER BY observed_at,event_id LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [
+            NormalizedFlow(
+                event_id=row["event_id"],
+                observed_at=row["observed_at"],
+                source=(
+                    WorkloadIdentity(
+                        row["source_tenant"],
+                        row["source_workload"],
+                        row["source_name"],
+                    )
+                    if row["source_workload"]
+                    else None
+                ),
+                destination=(
+                    WorkloadIdentity(
+                        row["destination_tenant"],
+                        row["destination_workload"],
+                        row["destination_name"],
+                    )
+                    if row["destination_workload"]
+                    else None
+                ),
+                identity_status=row["identity_status"],
+                verdict=row["verdict"],
+                drop_reason=row["drop_reason"],
+                protocol=row["protocol"],
+                destination_port=row["destination_port"],
+                node_name=row["node_name"],
+            )
+            for row in rows
+        ]
+
+    def get_normalized_traffic(self, limit: int = 100) -> list[dict]:
+        """Project resolved Hubble flows into the portal's traffic evidence model."""
+        if limit <= 0 or limit > 1_000:
+            raise ValueError("Invalid telemetry query limit")
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT normalized_flows.*,
+                          source.template AS source_template,
+                          destination.template AS destination_template
+                   FROM normalized_flows
+                   JOIN workloads source ON source.id=normalized_flows.source_workload
+                   JOIN workloads destination ON destination.id=normalized_flows.destination_workload
+                   WHERE identity_status='resolved'
+                     AND verdict IN ('forwarded','dropped')
+                   ORDER BY observed_at DESC,event_id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        events = []
+        seen_connections: set[tuple] = set()
+        for row in reversed(rows):
+            cross_tenant = row["source_tenant"] != row["destination_tenant"]
+            decision = "allowed" if row["verdict"] == "forwarded" else "denied"
+            approved_direction = (
+                row["source_tenant"] == row["destination_tenant"]
+                and (
+                    (row["source_template"] == "web" and row["destination_template"] == "api" and row["destination_port"] == 8080)
+                    or (row["source_template"] == "api" and row["destination_template"] == "database" and row["destination_port"] == 5432)
+                )
+            )
+            if decision == "allowed" and not approved_direction:
+                continue
+            connection_key = (
+                row["source_workload"],
+                row["destination_workload"],
+                row["destination_port"],
+                row["verdict"],
+                int(row["observed_at"] // 5),
+            )
+            if connection_key in seen_connections:
+                continue
+            seen_connections.add(connection_key)
+            reason = (
+                "cross-tenant"
+                if cross_tenant
+                else "approved-intent"
+                if decision == "allowed"
+                else "default-deny"
+            )
+            events.append({
+                "id": row["event_id"],
+                "at": row["observed_at"],
+                "sourceId": row["source_workload"],
+                "destinationId": row["destination_workload"],
+                "sourceName": row["source_name"],
+                "destinationName": row["destination_name"],
+                "sourceTenant": row["source_tenant"],
+                "destinationTenant": row["destination_tenant"],
+                "port": row["destination_port"] or 1,
+                "decision": decision,
+                "reason": reason,
+            })
+        return events
+
+    def approved_edges(self) -> set[tuple[str, str]]:
+        """Return the static web-to-API and API-to-database graph edges."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source.id,destination.id
+                   FROM workloads source
+                   JOIN workloads destination ON destination.tenant_id=source.tenant_id
+                   WHERE source.observed='running' AND destination.observed='running'
+                     AND ((source.template='web' AND destination.template='api')
+                       OR (source.template='api' AND destination.template='database'))""",
+            ).fetchall()
+        return {(row[0], row[1]) for row in rows}
+
+    def record_detection_finding(self, finding, evidence: list[dict]) -> bool:
+        """Persist one idempotent model finding and its linked incident."""
+        incident_id = f"incident-{finding.id}"
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM detection_findings WHERE id=?", (finding.id,)).fetchone():
+                return False
+            reason = (
+                f"Unexpected graph edge scored {finding.anomaly_score:.3f} "
+                f"(threshold {finding.threshold:.3f})"
+            )
+            trace = [{
+                "at": finding.created_at,
+                "title": "Graph anomaly detected",
+                "detail": (
+                    f"{finding.model_version} assigned probability "
+                    f"{finding.predicted_probability:.3f}; supporting facts: "
+                    f"{', '.join(key for key, value in finding.supporting_facts.items() if value)}"
+                ),
+            }]
+            db.execute(
+                """INSERT INTO incidents
+                   (id,source_id,source_name,tenant_id,status,reason,created_at,evidence_json,trace_json)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    incident_id,
+                    finding.source_id,
+                    finding.source_name,
+                    finding.source_tenant,
+                    "alert",
+                    reason,
+                    finding.created_at,
+                    json.dumps(evidence),
+                    json.dumps(trace),
+                ),
+            )
+            db.execute(
+                """INSERT INTO detection_findings
+                   (id,incident_id,model_version,window_start,window_end,source_id,destination_id,
+                    predicted_probability,anomaly_score,threshold,supporting_facts_json,event_ids_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    finding.id,
+                    incident_id,
+                    finding.model_version,
+                    finding.window_start,
+                    finding.window_end,
+                    finding.source_id,
+                    finding.destination_id,
+                    finding.predicted_probability,
+                    finding.anomaly_score,
+                    finding.threshold,
+                    json.dumps(finding.supporting_facts, sort_keys=True),
+                    json.dumps(finding.event_ids),
+                    finding.created_at,
+                ),
+            )
+            audit(db, f"system.detector:{finding.model_version}", finding.source_tenant, "incident.created", incident_id)
+        return True
+
+    def detection_findings(self) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM detection_findings ORDER BY created_at,id").fetchall()
+        return [
+            {
+                **dict(row),
+                "supporting_facts": json.loads(row["supporting_facts_json"]),
+                "event_ids": json.loads(row["event_ids_json"]),
+            }
+            for row in rows
+        ]
 
     def get_traffic(self, limit: int = 500) -> list:
         with self.connect() as db:
@@ -212,19 +866,14 @@ class Store:
             row = db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
             if not row:
                 raise ValueError("Incident not found")
+            if new_status == "review" and row["status"] not in {"quarantined", "review"}:
+                raise ValueError("Only a quarantined incident can enter review")
             traces = json.loads(row["trace_json"])
             traces.append(trace_entry)
             restored_at = trace_entry["at"] if new_status == "restored" else row["restored_at"]
             db.execute("UPDATE incidents SET status=?, restored_at=?, trace_json=? WHERE id=?",
                        (new_status, restored_at, json.dumps(traces), incident_id))
             
-            # If quarantined, update source workload
-            if new_status == "quarantined":
-                db.execute("UPDATE workloads SET quarantined=1 WHERE id=?", (row["source_id"],))
-                audit(db, actor, row["tenant_id"], "workload.quarantined", row["source_id"])
-            elif new_status == "restored":
-                db.execute("UPDATE workloads SET quarantined=0 WHERE id=?", (row["source_id"],))
-                audit(db, actor, row["tenant_id"], "workload.restored", row["source_id"])
 
     def seed_demo_data(self, admin_id: str):
         """Seed the canonical College and Hospital demonstration environment."""
@@ -257,6 +906,50 @@ class Store:
                         (wid, tid, wname, tmpl, "running", "running", 0, 1, now, wid)
                     )
             audit(db, admin_id, None, "demo.seeded", "college,hospital")
+
+    def provision_reference_lab(self, admin_id: str):
+        """Queue the fixed College/Hospital stack through the real reconciler."""
+        now = time.time()
+        with self.connect() as db:
+            for tenant_id, name, description in [
+                ("college", "School", "Academic management services"),
+                ("hospital", "Hospital", "Healthcare management services"),
+            ]:
+                db.execute(
+                    """INSERT INTO tenants(id,name,description,created) VALUES(?,?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description""",
+                    (tenant_id, name, description, now),
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO memberships(tenant_id,user_id,role) VALUES(?,?,?)",
+                    (tenant_id, admin_id, "admin"),
+                )
+                for template in ("database", "api", "web"):
+                    workload_id = f"{tenant_id}-{template}"
+                    db.execute(
+                        """INSERT OR IGNORE INTO workloads
+                           (id,tenant_id,name,template,desired,observed,created)
+                           VALUES(?,?,?,?,?,'pending',?)""",
+                        (workload_id, tenant_id, workload_id, template, "running", now),
+                    )
+                    operation_id = str(uuid.uuid4())
+                    idempotency_key = f"reference-lab:{REFERENCE_LAB_REVISION}:{tenant_id}:{template}:deploy"
+                    db.execute(
+                        """INSERT OR IGNORE INTO operations
+                           (id,user_id,tenant_id,workload_id,action,status,idempotency_key,fingerprint,created,error)
+                           VALUES(?,?,?,?,?,'queued',?,?,?,NULL)""",
+                        (
+                            operation_id,
+                            admin_id,
+                            tenant_id,
+                            workload_id,
+                            "deploy",
+                            idempotency_key,
+                            idempotency_key,
+                            now,
+                        ),
+                    )
+            audit(db, admin_id, None, "reference_lab.provisioned", "college,hospital")
 
 
 def audit(db, actor, tenant, action, resource=None, outcome="accepted"):

@@ -1,10 +1,13 @@
 """Authenticated management API. Queued intent is never reported as deployment success."""
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 import secrets
 import sqlite3
+import threading
 import time
 from typing import Literal
 from urllib.parse import urlparse
@@ -18,15 +21,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .catalog import catalog_response, stack_definition
 from .store import Store, audit
-from .detection import DenialBurstBaseline, FlowRecord
+from .detection import (
+    DenialBurstBaseline,
+    EdgeFrequencyDetectionPipeline,
+    FlowRecord,
+    TemporalGraphDetectionPipeline,
+)
+from .detection.temporal_graph import WorkloadDescriptor
+from .infrastructure import InfrastructureUnavailable
+from .infrastructure.kubernetes import KubernetesInfrastructure
+from .telemetry import HubbleJsonFileCollector, IdentityIndex
 
-CATALOG = [
-    dict(id="web", name="Web application", cpu=0.25, memory=128, port=80),
-    dict(id="api", name="API service", cpu=0.5, memory=256, port=8080),
-    dict(id="database", name="Database", cpu=0.5, memory=512, port=5432),
-]
-
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Settings:
@@ -35,6 +43,12 @@ class Settings:
     secure_cookie: bool = True
     session_seconds: int = 3600
     tenant_limit: int = 2
+    infrastructure: Literal["disabled", "kubernetes"] = "disabled"
+    kubeconfig: Path | None = None
+    kube_api: str | None = None
+    retail_manifest: Path | None = None
+    hubble_export: Path | None = None
+    temporal_model: Path | None = None
 
     def __post_init__(self):
         parsed = urlparse(self.origin)
@@ -48,6 +62,32 @@ class Settings:
             raise ValueError("Insecure cookies are restricted to loopback development")
         if self.session_seconds <= 0 or self.tenant_limit <= 0:
             raise ValueError("Invalid session or tenant limits")
+        if self.infrastructure not in {"disabled", "kubernetes"}:
+            raise ValueError("Infrastructure must be disabled or kubernetes")
+        if self.kube_api:
+            kube_api = urlparse(self.kube_api)
+            if (
+                kube_api.scheme not in {"http", "https"}
+                or kube_api.hostname not in {"127.0.0.1", "localhost"}
+                or not kube_api.port
+            ):
+                raise ValueError("Kubernetes API override must be a loopback URL with a port")
+        if self.temporal_model is not None:
+            if self.temporal_model.is_symlink():
+                raise ValueError("Temporal model must not be a symbolic link")
+            model = self.temporal_model.resolve(strict=True)
+            if model.suffix.lower() != ".pt" or not model.is_file():
+                raise ValueError("Temporal model must be a regular .pt file")
+            if model.stat().st_size > 10 * 1024 * 1024:
+                raise ValueError("Temporal model exceeds the 10 MiB limit")
+        if self.retail_manifest is not None:
+            if self.retail_manifest.is_symlink():
+                raise ValueError("Retail manifest must not be a symbolic link")
+            manifest = self.retail_manifest.resolve(strict=True)
+            if manifest.suffix.lower() not in {".yaml", ".yml"} or not manifest.is_file():
+                raise ValueError("Retail manifest must be a regular YAML file")
+            if manifest.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("Retail manifest exceeds the 2 MiB limit")
 
 
 class Body(BaseModel):
@@ -75,6 +115,11 @@ class Deploy(Body):
     template: Literal["web", "api", "database"]
 
 
+class StackDeploy(Body):
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,39}$")
+    stack: Literal["retail-stack", "facilities-vendor-stack"]
+
+
 class Lifecycle(Body):
     confirmation: str = Field(min_length=3, max_length=40)
     expected_version: int = Field(ge=1)
@@ -87,12 +132,141 @@ class TrafficSimulate(Body):
 
 
 def create_app(settings: Settings) -> FastAPI:
-    app = FastAPI(title="SecureCloud API", docs_url=None, redoc_url=None, openapi_url=None)
-    store = Store(settings.database)
+    infrastructure = (
+        KubernetesInfrastructure(
+            settings.kubeconfig,
+            api_server=settings.kube_api,
+            retail_manifest=settings.retail_manifest,
+        )
+        if settings.infrastructure == "kubernetes"
+        else None
+    )
+    store = Store(settings.database, infrastructure=infrastructure)
     detector = DenialBurstBaseline(window_seconds=60.0, denial_threshold=3)
+    graph_detector = (
+        TemporalGraphDetectionPipeline(settings.temporal_model)
+        if settings.temporal_model is not None
+        else EdgeFrequencyDetectionPipeline(anomaly_threshold=0.6)
+    )
+    if isinstance(graph_detector, TemporalGraphDetectionPipeline):
+        graph_detector.validate([
+            WorkloadDescriptor(**item) for item in store.detection_workloads()
+        ])
+    stop_reconciler = threading.Event()
+    telemetry_status = {
+        "enabled": settings.hubble_export is not None,
+        "accepted": 0,
+        "rejected": 0,
+        "last_poll": None,
+        "last_error": None,
+        "findings": 0,
+        "detector": getattr(graph_detector, "model_version", "edge-frequency-v1"),
+    }
+    collector = (
+        HubbleJsonFileCollector(
+            settings.hubble_export,
+            lambda: IdentityIndex(store.workload_identities()),
+        )
+        if settings.hubble_export is not None
+        else None
+    )
+
+    def reconcile_loop():
+        while not stop_reconciler.is_set():
+            try:
+                store.reconcile_operations()
+                store.reconcile_stack_operations()
+                store.reconcile_containment_requests()
+            except Exception:
+                logger.exception("Infrastructure reconciliation iteration failed")
+            stop_reconciler.wait(2.0)
+
+    def telemetry_loop():
+        while not stop_reconciler.is_set():
+            try:
+                batch = collector.poll()
+                inserted = store.ingest_normalized_flows(list(batch.flows))
+                new_findings = 0
+                if inserted:
+                    arguments = [
+                        store.get_normalized_flows(limit=100_000),
+                        store.approved_edges(),
+                    ]
+                    if isinstance(graph_detector, TemporalGraphDetectionPipeline):
+                        arguments.append([
+                            WorkloadDescriptor(**item)
+                            for item in store.detection_workloads()
+                        ])
+                    findings = graph_detector.analyze(*arguments)
+                    evidence_by_id = {
+                        event["id"]: event
+                        for event in store.get_normalized_traffic(limit=1_000)
+                    }
+                    for finding in findings:
+                        evidence = [
+                            evidence_by_id[event_id]
+                            for event_id in finding.event_ids
+                            if event_id in evidence_by_id
+                        ]
+                        if evidence and store.record_detection_finding(finding, evidence):
+                            new_findings += 1
+                telemetry_status.update(
+                    accepted=telemetry_status["accepted"] + inserted,
+                    rejected=telemetry_status["rejected"] + batch.rejected_count,
+                    last_poll=time.time(),
+                    last_error=None,
+                    findings=telemetry_status["findings"] + new_findings,
+                )
+            except Exception as exc:
+                telemetry_status.update(
+                    last_poll=time.time(),
+                    last_error=type(exc).__name__,
+                )
+                logger.warning("Hubble telemetry poll failed: %s", type(exc).__name__)
+            stop_reconciler.wait(1.0)
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        threads = []
+        if infrastructure is not None:
+            threads.append(
+                threading.Thread(
+                    target=reconcile_loop,
+                    name="securecloud-reconciler",
+                    daemon=True,
+                ),
+            )
+        if collector is not None:
+            threads.append(
+                threading.Thread(
+                    target=telemetry_loop,
+                    name="securecloud-telemetry",
+                    daemon=True,
+                ),
+            )
+        application.state.background_threads = threads
+        for thread in threads:
+            thread.start()
+        try:
+            yield
+        finally:
+            stop_reconciler.set()
+            for thread in threads:
+                thread.join(timeout=5)
+
+    app = FastAPI(
+        title="SecureCloud API",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.state.store = store
     app.state.detector = detector
+    app.state.graph_detector = graph_detector
     app.state.settings = settings
+    app.state.infrastructure = infrastructure
+    app.state.telemetry_status = telemetry_status
     hasher = PasswordHasher()
     dummy_hash = hasher.hash(secrets.token_urlsafe(32))
     cookie = "__Host-securecloud" if settings.secure_cookie else "securecloud_dev"
@@ -188,9 +362,38 @@ def create_app(settings: Settings) -> FastAPI:
         audit(db, user["user_id"], tenant, f"workload.{action}.requested", workload)
         return operation
 
+    def stack_idem(request, user, db, fingerprint):
+        key = request.headers.get("idempotency-key", "")
+        if not 8 <= len(key) <= 100 or not key.isascii() or not key.isprintable():
+            raise HTTPException(
+                422, "Supply an Idempotency-Key of 8-100 printable ASCII characters"
+            )
+        old = db.execute(
+            "SELECT * FROM stack_operations "
+            "WHERE user_id=? AND idempotency_key=?",
+            (user["user_id"], key),
+        ).fetchone()
+        if old and old["fingerprint"] != fingerprint:
+            raise HTTPException(409, "Idempotency key was used for another request")
+        return key, dict(old) if old else None
+
     @app.get("/api/health")
     def health():
-        return {"service": "securecloud", "infrastructure": "not-connected"}
+        if infrastructure is None:
+            return {
+                "service": "securecloud",
+                "infrastructure": {"connected": False, "provider": "disabled"},
+                "telemetry": dict(telemetry_status),
+            }
+        try:
+            state = infrastructure.health()
+        except InfrastructureUnavailable:
+            state = {"connected": False, "provider": "kubernetes", "state": "inconclusive"}
+        return {
+            "service": "securecloud",
+            "infrastructure": state,
+            "telemetry": dict(telemetry_status),
+        }
 
     @app.post("/api/auth/login")
     def login(body: Login, request: Request, response: Response):
@@ -240,7 +443,12 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/api/catalog")
     def catalog(request: Request):
         session(request)
-        return CATALOG
+        deployable = (
+            frozenset({"retail-stack"})
+            if infrastructure is not None and settings.retail_manifest is not None
+            else frozenset()
+        )
+        return catalog_response(deployable)
 
     @app.get("/api/tenants")
     def tenants(request: Request):
@@ -309,6 +517,125 @@ def create_app(settings: Settings) -> FastAPI:
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "Workload name already exists")
             return enqueue(db, user, tenant, workload, "deploy", key, fingerprint)
+
+    @app.get("/api/tenants/{tenant}/stacks")
+    def stacks(tenant: str, request: Request):
+        user = session(request)
+        with store.connect() as db:
+            authorize(db, user, tenant)
+            rows = db.execute(
+                "SELECT * FROM stack_deployments WHERE tenant_id=? "
+                "AND desired!='deleted' ORDER BY created",
+                (tenant,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    @app.post("/api/tenants/{tenant}/stacks", status_code=202)
+    def deploy_stack(tenant: str, body: StackDeploy, request: Request):
+        user = session(request, True)
+        definition = stack_definition(body.stack)
+        if definition is None:
+            raise HTTPException(422, "Unknown stack")
+        fingerprint = sha256(
+            json.dumps(
+                [tenant, "stack.deploy", body.model_dump()], sort_keys=True
+            ).encode()
+        ).hexdigest()
+        with store.connect() as db:
+            authorize(db, user, tenant, write=True)
+            if body.stack != "retail-stack":
+                raise HTTPException(409, "Stack deployment is not implemented")
+            if infrastructure is None or settings.retail_manifest is None:
+                raise HTTPException(
+                    503, "Retail stack infrastructure is not configured"
+                )
+            key, old = stack_idem(request, user, db, fingerprint)
+            if old:
+                return old
+            existing_count = db.execute(
+                "SELECT count(*) FROM workloads "
+                "WHERE tenant_id=? AND observed!='deleted'",
+                (tenant,),
+            ).fetchone()[0]
+            if existing_count + len(definition.services) > 12:
+                raise HTTPException(
+                    409, "Retail stack requires an empty tenant workload quota"
+                )
+            deployment_id = str(uuid.uuid4())
+            operation_id = str(uuid.uuid4())
+            now = time.time()
+            try:
+                db.execute(
+                    """INSERT INTO stack_deployments
+                       (id,tenant_id,name,stack_id,desired,observed,created)
+                       VALUES(?,?,?,?,?,'pending',?)""",
+                    (
+                        deployment_id,
+                        tenant,
+                        body.name,
+                        body.stack,
+                        "running",
+                        now,
+                    ),
+                )
+                for component in definition.services:
+                    db.execute(
+                        """INSERT INTO workloads
+                           (id,tenant_id,name,template,desired,observed,created,
+                            stack_deployment_id)
+                           VALUES(?,?,?,?,?,'pending',?,?)""",
+                        (
+                            str(uuid.uuid4()),
+                            tenant,
+                            component.id,
+                            component.template,
+                            "running",
+                            now,
+                            deployment_id,
+                        ),
+                    )
+                operation = {
+                    "id": operation_id,
+                    "user_id": user["user_id"],
+                    "tenant_id": tenant,
+                    "stack_deployment_id": deployment_id,
+                    "action": "deploy",
+                    "status": "queued",
+                    "idempotency_key": key,
+                    "fingerprint": fingerprint,
+                    "created": now,
+                    "error": None,
+                }
+                db.execute(
+                    """INSERT INTO stack_operations
+                       VALUES(:id,:user_id,:tenant_id,:stack_deployment_id,
+                              :action,:status,:idempotency_key,:fingerprint,
+                              :created,:error)""",
+                    operation,
+                )
+                audit(
+                    db,
+                    user["user_id"],
+                    tenant,
+                    "stack.deploy.requested",
+                    deployment_id,
+                )
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, "Stack name or type already exists")
+            return operation
+
+    @app.get("/api/tenants/{tenant}/stack-operations/{operation}")
+    def stack_operation(tenant: str, operation: str, request: Request):
+        user = session(request)
+        with store.connect() as db:
+            authorize(db, user, tenant)
+            row = db.execute(
+                "SELECT * FROM stack_operations WHERE id=? AND tenant_id=?",
+                (operation, tenant),
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "Stack operation not found")
+            return dict(row)
 
     @app.post("/api/tenants/{tenant}/workloads/{workload}/{action}", status_code=202)
     def lifecycle(tenant: str, workload: str, action: Literal["stop", "delete"], body: Lifecycle, request: Request):
@@ -510,17 +837,16 @@ def create_app(settings: Settings) -> FastAPI:
         user = session(request, True)
         with store.connect() as db:
             authorize_incident(db, user, incident_id, write=True)
-        now = time.time()
-        trace_entry = {
-            "at": now,
-            "title": "Response: quarantined",
-            "detail": "Simulated inbound and outbound traffic is now denied, including previously approved access.",
-        }
         try:
-            store.update_incident_status(incident_id, "quarantined", trace_entry, actor=user["user_id"])
-        except ValueError:
-            raise HTTPException(404, "Incident not found")
-        return {"status": "quarantined"}
+            store.request_containment(incident_id, "quarantine", user["user_id"])
+            store.reconcile_containment_requests()
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 409
+            raise HTTPException(status, str(exc))
+        result = store.get_containment_request(incident_id)
+        if result["status"] != "succeeded":
+            raise HTTPException(503, result["error"] or "Containment has not been verified")
+        return {"status": "quarantined", "verified": True}
 
     @app.post("/api/incidents/{incident_id}/review")
     def review_incident(incident_id: str, request: Request):
@@ -535,8 +861,9 @@ def create_app(settings: Settings) -> FastAPI:
         }
         try:
             store.update_incident_status(incident_id, "review", trace_entry, actor=user["user_id"])
-        except ValueError:
-            raise HTTPException(404, "Incident not found")
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 409
+            raise HTTPException(status, str(exc))
         return {"status": "review"}
 
     @app.post("/api/incidents/{incident_id}/restore")
@@ -544,23 +871,25 @@ def create_app(settings: Settings) -> FastAPI:
         user = session(request, True)
         with store.connect() as db:
             authorize_incident(db, user, incident_id, write=True)
-        now = time.time()
-        trace_entry = {
-            "at": now,
-            "title": "Response: restored",
-            "detail": "Quarantine removed. The original static tenant intents apply again.",
-        }
         try:
-            store.update_incident_status(incident_id, "restored", trace_entry, actor=user["user_id"])
-        except ValueError:
-            raise HTTPException(404, "Incident not found")
-        return {"status": "restored"}
+            store.request_containment(incident_id, "restore", user["user_id"])
+            store.reconcile_containment_requests()
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 409
+            raise HTTPException(status, str(exc))
+        result = store.get_containment_request(incident_id)
+        if result["status"] != "succeeded":
+            raise HTTPException(503, result["error"] or "Restore has not been verified")
+        return {"status": "restored", "verified": True}
 
     @app.post("/api/demo/load")
     def load_demo(request: Request):
         user = session(request, True)
         if not user["administrator"]:
             raise HTTPException(403, "Administrator access required")
+        if settings.infrastructure == "kubernetes":
+            store.provision_reference_lab(user["user_id"])
+            return {"status": "provisioning"}
         store.seed_demo_data(user["user_id"])
         return {"status": "loaded"}
 
@@ -569,7 +898,20 @@ def create_app(settings: Settings) -> FastAPI:
         user = session(request)
         # Read through Store before opening the tenant query transaction; Store
         # methods own their connections and SQLite rejects nested write locks.
-        all_traffic = store.get_traffic(limit=100)
+        recorded_traffic = store.get_traffic(limit=100)
+        live_traffic = store.get_normalized_traffic(limit=100)
+        merged_traffic = sorted(
+            [*recorded_traffic, *live_traffic],
+            key=lambda event: (event["at"], event["id"]),
+        )
+        distinct_traffic = {}
+        for event in merged_traffic:
+            key = (
+                event["sourceId"], event["destinationId"], event["port"],
+                event["decision"], event["reason"], int(event["at"] // 5),
+            )
+            distinct_traffic[key] = event
+        all_traffic = list(distinct_traffic.values())[-100:]
         all_incidents = store.get_incidents()
         with store.connect() as db:
             visible = visible_tenant_ids(db, user)
@@ -587,8 +929,19 @@ def create_app(settings: Settings) -> FastAPI:
                     "templateId": r["template"],
                     "name": r["name"],
                     "status": r["observed"],
+                    "desired": r["desired"],
                     "quarantined": bool(r["quarantined"]),
+                    "version": r["version"],
+                    "kubernetesUid": r["kubernetes_uid"],
+                    "kubernetesVersion": r["kubernetes_version"],
                     "createdAt": r["created"],
+                    "previewUrl": (
+                        "http://127.0.0.1:8091/"
+                        if r["id"] == "college-web" and r["observed"] == "running"
+                        else "http://127.0.0.1:8092/"
+                        if r["id"] == "hospital-web" and r["observed"] == "running"
+                        else None
+                    ),
                 }
                 for r in db.execute("SELECT * FROM workloads WHERE observed!='deleted' ORDER BY created").fetchall()
                 if r["tenant_id"] in visible
