@@ -3,8 +3,7 @@ import { usePortal } from "../../app/PortalContext";
 import { Icon, type IconName } from "../../components/Icon";
 import { Badge } from "../../components/ui";
 import { ActionButton } from "../../components/ActionButton";
-
-type Destination = "workloads" | "network" | "incidents";
+import { DemoStageSurface } from "./DemoStageSurface";
 
 type DemoStep = {
   title: string;
@@ -12,8 +11,6 @@ type DemoStep = {
   icon: IconName;
   explanation: string;
   presenter: string;
-  destination: Destination;
-  action: string;
 };
 
 const steps: readonly DemoStep[] = [
@@ -25,8 +22,6 @@ const steps: readonly DemoStep[] = [
       "Two tenants run independent application stacks. RetailCo contains the storefront services; FacilitiesVendor contains a portal, maintenance API, and database.",
     presenter:
       "Start with the business applications. They work independently of the security console and their workload identities come from Kubernetes.",
-    destination: "workloads",
-    action: "View workloads",
   },
   {
     title: "Normal traffic is permitted",
@@ -36,8 +31,6 @@ const steps: readonly DemoStep[] = [
       "Default deny is active, with narrow source, destination, and port intents for expected service communication. Hubble records forwarded traffic as positive evidence.",
     presenter:
       "Point out an allowed web-to-API or API-to-database connection. An allowed result is observed evidence, not an assumption based on policy configuration.",
-    destination: "network",
-    action: "View allowed traffic",
   },
   {
     title: "Unexpected movement is blocked",
@@ -47,8 +40,6 @@ const steps: readonly DemoStep[] = [
       "A compromised vendor workload attempts an unapproved RetailCo connection. Cilium enforces the policy and Hubble reports an explicit POLICY_DENIED verdict.",
     presenter:
       "Use the denied vendor-api to RetailCo row. This demonstrates prevention before the detector or response workflow is involved.",
-    destination: "network",
-    action: "View denied evidence",
   },
   {
     title: "Temporal risk is calculated",
@@ -58,8 +49,6 @@ const steps: readonly DemoStep[] = [
       "The temporal graph engine scores the connection, accumulates source risk with EWMA, compares it with the edge-frequency baseline, and checks corroborating policy facts.",
     presenter:
       "Show the GNN, accumulated, baseline, and threshold columns. A high model score alone stays under observation; corroborated threshold crossings recommend response.",
-    destination: "incidents",
-    action: "View temporal risk",
   },
   {
     title: "The workload is contained",
@@ -69,8 +58,6 @@ const steps: readonly DemoStep[] = [
       "An authorized operator can quarantine the source. The workload-scoped deny policy survives reconciliation and pod replacement while evidence remains available for review.",
     presenter:
       "Open the active incident and walk through Alert, Quarantined, Review, and Restored. Quarantine is the only live mutation in this walkthrough.",
-    destination: "incidents",
-    action: "Open response controls",
   },
   {
     title: "Access is safely restored",
@@ -80,8 +67,6 @@ const steps: readonly DemoStep[] = [
       "After review, restore removes the quarantine policy and returns the workload to its prior approved intents. The incident trace and triggering flows remain preserved.",
     presenter:
       "Finish with a restored incident and its complete trace. Then return to Network Map to confirm normal approved traffic is forwarded again.",
-    destination: "incidents",
-    action: "View recovery evidence",
   },
 ];
 
@@ -92,11 +77,7 @@ const chain = [
   ["Response", "Quarantine + restore"],
 ] as const;
 
-export function DemoFlow({
-  navigate,
-}: {
-  navigate: (destination: Destination) => void;
-}) {
+export function DemoFlow() {
   const { data } = usePortal();
   const [selected, setSelected] = useState(0);
   const step = steps[selected];
@@ -125,11 +106,11 @@ export function DemoFlow({
     <div className="demo-flow-page">
       <section className="demo-flow-intro" aria-labelledby="demo-flow-heading">
         <div>
-          <span className="demo-flow-eyebrow">Presenter walkthrough</span>
+          <span className="demo-flow-eyebrow">Self-contained demonstration</span>
           <h2 id="demo-flow-heading">From workload traffic to recovery</h2>
           <p>
-            Follow the six steps in order. Each step explains what to show, what
-            SecureCloud is doing, and where the live evidence is located.
+            Operate the applications, inspect enforcement and model evidence,
+            and complete incident response without leaving this page.
           </p>
         </div>
         <div className="demo-flow-readiness" aria-label="Demo evidence readiness">
@@ -190,20 +171,9 @@ export function DemoFlow({
               <p>{step.presenter}</p>
             </div>
           </div>
-          {selected === 0 && (retail || vendor) ? (
-            <div className="demo-app-links">
-              {retail?.previewUrl ? (
-                <a className="button" href={retail.previewUrl} target="_blank" rel="noreferrer">
-                  Open RetailCo app <Icon name="arrow" size={15} />
-                </a>
-              ) : null}
-              {vendor?.previewUrl ? (
-                <a className="button" href={vendor.previewUrl} target="_blank" rel="noreferrer">
-                  Open FacilitiesVendor app <Icon name="arrow" size={15} />
-                </a>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="demo-stage-surface">
+            <DemoStageSurface selected={selected} />
+          </div>
           <footer>
             <ActionButton
               className="button"
@@ -213,9 +183,6 @@ export function DemoFlow({
               Previous
             </ActionButton>
             <div>
-              <ActionButton className="button" onClick={() => navigate(step.destination)}>
-                {step.action} <Icon name="arrow" size={15} />
-              </ActionButton>
               {selected < steps.length - 1 ? (
                 <ActionButton
                   className="button primary"
