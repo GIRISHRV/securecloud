@@ -4,6 +4,7 @@ import { useAction, usePortal } from "../../app/PortalContext";
 import { Badge, Empty, Panel, time } from "../../components/ui";
 import { Icon } from "../../components/Icon";
 import type { Incident } from "../../domain/models";
+import { formatRiskScore, selectRiskEvidence } from "../../domain/riskEvidence";
 import { TrafficTable } from "../network/TrafficTable";
 
 export const incidentTone = (status: Incident["status"]) =>
@@ -24,7 +25,7 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
       filter === "all" ||
       (filter === "active" ? i.status !== "restored" : i.status === "restored"),
   );
-  const risk = data.security?.observations.slice(-8).reverse() ?? [];
+  const risk = selectRiskEvidence(data.security?.observations ?? [], 8);
   const selected = incidents.find((i) => i.id === selectedId) ?? incidents[0];
   return (
     <>
@@ -94,11 +95,11 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
                         <strong>{item.sourceName}</strong>
                         <span> → {item.destinationName}</span>
                       </td>
-                      <td>{item.anomalyScore.toFixed(3)}</td>
+                      <td>{formatRiskScore(item.anomalyScore)}</td>
                       <td>
-                        {item.accumulatedRisk.toFixed(3)} / {item.threshold.toFixed(3)}
+                        {formatRiskScore(item.accumulatedRisk)} / {formatRiskScore(item.threshold)}
                       </td>
-                      <td>{item.baselineScore.toFixed(3)}</td>
+                      <td>{formatRiskScore(item.baselineScore)}</td>
                       <td>
                         <Badge tone={item.response === "containment-recommended" ? "red" : "neutral"}>
                           {item.response === "containment-recommended" ? "Respond" : "Observe"}

@@ -49,6 +49,16 @@ test("captures the live presentation workflow", async ({ page }) => {
   await expect(
     page.getByRole("table", { name: "Demo temporal risk evidence" }),
   ).toBeVisible();
+  await expect(
+    page
+      .getByRole("table", { name: "Demo temporal risk evidence" })
+      .getByText("1.000", { exact: true })
+      .first(),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "../runtime/presentation-demo-risk.png",
+    fullPage: true,
+  });
 
   await page
     .getByRole("navigation", { name: "Demo steps" })

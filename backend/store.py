@@ -878,17 +878,51 @@ class Store:
     def risk_observations(self, limit: int = 120) -> list[dict]:
         if limit <= 0 or limit > 1_000:
             raise ValueError("Invalid risk observation limit")
+        highlight_limit = min(12, max(0, limit - 1))
         with self.connect() as db:
             rows = db.execute(
-                """SELECT risk_observations.*, source.tenant_id,
+                """WITH recent AS (
+                       SELECT * FROM risk_observations
+                       ORDER BY window_end DESC,source_id,destination_id LIMIT ?
+                   ), highlighted AS (
+                       SELECT * FROM risk_observations
+                       ORDER BY (response='containment-recommended') DESC,
+                                anomaly_score DESC,window_end DESC LIMIT ?
+                   ), selected AS (
+                       SELECT * FROM recent
+                       UNION
+                       SELECT * FROM highlighted
+                   )
+                   SELECT selected.*, source.tenant_id,
                           source.name AS source_name,
                           destination.name AS destination_name
-                   FROM risk_observations
-                   LEFT JOIN workloads source ON source.id=risk_observations.source_id
-                   LEFT JOIN workloads destination ON destination.id=risk_observations.destination_id
-                   ORDER BY window_end DESC,source_id,destination_id LIMIT ?""",
-                (limit,),
+                   FROM selected
+                   LEFT JOIN workloads source ON source.id=selected.source_id
+                   LEFT JOIN workloads destination ON destination.id=selected.destination_id
+                   ORDER BY window_end DESC,source_id,destination_id""",
+                (limit, highlight_limit),
             ).fetchall()
+        ranked = sorted(
+            rows,
+            key=lambda row: (
+                row["response"] == "containment-recommended",
+                row["accumulated_risk"],
+                row["anomaly_score"],
+                row["window_end"],
+            ),
+            reverse=True,
+        )
+        recent = sorted(rows, key=lambda row: row["window_end"], reverse=True)
+        selected = {}
+        for row in ranked[:highlight_limit]:
+            key = (row["model_version"], row["window_start"], row["source_id"], row["destination_id"])
+            selected[key] = row
+        for row in recent:
+            if len(selected) >= limit:
+                break
+            key = (row["model_version"], row["window_start"], row["source_id"], row["destination_id"])
+            selected[key] = row
+        rows = sorted(selected.values(), key=lambda row: row["window_end"])
         return [
             {
                 "modelVersion": row["model_version"],
@@ -906,7 +940,7 @@ class Store:
                 "response": row["response"],
                 "tenantId": row["tenant_id"],
             }
-            for row in reversed(rows)
+            for row in rows
         ]
 
     def detection_findings(self) -> list[dict]:
