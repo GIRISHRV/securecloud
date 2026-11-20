@@ -41,8 +41,13 @@ const Incidents = lazy(() =>
     default: module.Incidents,
   })),
 );
+const DemoFlow = lazy(() =>
+  import("../features/demo/DemoFlow").then((module) => ({
+    default: module.DemoFlow,
+  })),
+);
 
-type View = "overview" | "workloads" | "catalog" | "network" | "incidents";
+type View = "overview" | "demo" | "workloads" | "catalog" | "network" | "incidents";
 const views: { id: View; name: string; icon: IconName; description: string }[] =
   [
     {
@@ -50,6 +55,12 @@ const views: { id: View; name: string; icon: IconName; description: string }[] =
       name: "Overview",
       icon: "grid",
       description: "Your resources and security activity, in one place.",
+    },
+    {
+      id: "demo",
+      name: "Demo Flow",
+      icon: "activity",
+      description: "Present the complete SecureCloud security workflow.",
     },
     {
       id: "workloads",
@@ -385,6 +396,7 @@ function ConsoleApp() {
                   busy={busy}
                 />
               )}
+              {view === "demo" && <DemoFlow navigate={navigate} />}
               {view === "workloads" && (
                 <Workloads
                   onDeploy={() => navigate("catalog")}
