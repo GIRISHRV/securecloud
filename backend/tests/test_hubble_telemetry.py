@@ -187,6 +187,20 @@ def test_normalized_flow_storage_is_deduplicated_and_round_trips(tmp_path):
     assert store.get_normalized_flows() == [flow]
 
 
+def test_normalized_flow_query_keeps_the_latest_bounded_window(tmp_path):
+    store = Store(tmp_path / "telemetry.sqlite")
+    flows = [
+        normalize_hubble_flow(
+            payload(f"flow-{sequence}", f"2026-11-13T09:00:0{sequence}Z"),
+            index(),
+        )
+        for sequence in (1, 2, 3)
+    ]
+    store.ingest_normalized_flows(flows)
+
+    assert store.get_normalized_flows(limit=2) == flows[1:]
+
+
 def test_resolved_hubble_flows_are_projected_as_portal_policy_evidence(tmp_path):
     store = Store(tmp_path / "telemetry.sqlite")
     with store.connect() as database:

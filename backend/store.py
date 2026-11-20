@@ -623,7 +623,10 @@ class Store:
         parameters.append(limit)
         with self.connect() as db:
             rows = db.execute(
-                f"SELECT * FROM normalized_flows {where} ORDER BY observed_at,event_id LIMIT ?",
+                f"""SELECT * FROM (
+                       SELECT * FROM normalized_flows {where}
+                       ORDER BY observed_at DESC,event_id DESC LIMIT ?
+                     ) ORDER BY observed_at,event_id""",
                 parameters,
             ).fetchall()
         return [
@@ -664,14 +667,35 @@ class Store:
             raise ValueError("Invalid telemetry query limit")
         with self.connect() as db:
             rows = db.execute(
-                """SELECT normalized_flows.*,
-                          source.template AS source_template,
-                          destination.template AS destination_template
-                   FROM normalized_flows
-                   JOIN workloads source ON source.id=normalized_flows.source_workload
-                   JOIN workloads destination ON destination.id=normalized_flows.destination_workload
-                   WHERE identity_status='resolved'
-                     AND verdict IN ('forwarded','dropped')
+                """WITH ranked AS (
+                     SELECT normalized_flows.*,
+                            source.template AS source_template,
+                            destination.template AS destination_template,
+                            ROW_NUMBER() OVER (
+                              PARTITION BY source_workload,destination_workload,
+                                           destination_port,verdict
+                              ORDER BY observed_at DESC,event_id DESC
+                            ) AS connection_rank
+                     FROM normalized_flows
+                     JOIN workloads source ON source.id=normalized_flows.source_workload
+                     JOIN workloads destination ON destination.id=normalized_flows.destination_workload
+                     WHERE identity_status='resolved'
+                       AND verdict IN ('forwarded','dropped')
+                       AND (
+                         verdict='dropped'
+                         OR (
+                           verdict='forwarded'
+                           AND source.tenant_id=destination.tenant_id
+                           AND (
+                             (source.template='web' AND destination.template='api'
+                               AND destination_port=8080)
+                             OR (source.template='api' AND destination.template='database'
+                               AND destination_port=5432)
+                           )
+                         )
+                       )
+                   )
+                   SELECT * FROM ranked WHERE connection_rank=1
                    ORDER BY observed_at DESC,event_id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()

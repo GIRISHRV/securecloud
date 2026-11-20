@@ -66,7 +66,7 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
   return (
     <>
       <Panel
-        title="Tenant network topology"
+        title="Tenant workload inventory"
       >
         <Topology />
       </Panel>
@@ -74,10 +74,10 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
         <Panel title={service.mode === "api" ? "Live enforcement" : "Connection simulator"}>
           {service.mode === "api" ? (
             <div className="live-policy-summary">
-              <strong>Cilium network policy is active</strong>
+              <strong>Namespace policy controls are active</strong>
               <p>
-                Approved service paths continue to operate. Denied connections
-                shown below are observed Hubble verdicts from the cluster.
+                Workloads are grouped by catalog role; this inventory does not
+                infer traffic. Observed Hubble verdicts appear below.
               </p>
               <p>
                 Controlled security scenarios run outside this portal and cannot
@@ -220,10 +220,13 @@ export function Network({ onIncidents }: { onIncidents: () => void }) {
         <Panel title={service.mode === "api" ? "Policy controls" : "Detection rule"}>
           {service.mode === "api" ? (
             <div className="live-policy-summary">
-              <strong>Default deny</strong>
-              <p>Web workloads can reach only their tenant API on TCP 8080.</p>
-              <p>API workloads can reach only their tenant database on TCP 5432.</p>
-              <p>Cross-tenant workload traffic is denied and retained as evidence.</p>
+              <strong>Current policy scope</strong>
+              <p>FacilitiesVendor allows web to API on TCP 8080.</p>
+              <p>FacilitiesVendor allows API to PostgreSQL on TCP 5432.</p>
+              <p>
+                RetailCo retains its bounded compatibility policy; explicit
+                service intents and the vendor exception are the next milestone.
+              </p>
             </div>
           ) : (
           <div className="rule-content">

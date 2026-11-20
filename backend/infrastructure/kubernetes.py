@@ -118,9 +118,11 @@ class KubernetesInfrastructure:
         try:
             if action != "deploy":
                 raise ValueError(f"Unsupported stack action: {action}")
-            if stack.stack_id != "retail-stack":
-                raise ValueError("Stack has no Kubernetes reconciler")
-            return self._deploy_retail_stack(stack, components)
+            if stack.stack_id == "retail-stack":
+                return self._deploy_retail_stack(stack, components)
+            if stack.stack_id == "facilities-vendor-stack":
+                return self._deploy_facilities_vendor_stack(stack, components)
+            raise ValueError("Stack has no Kubernetes reconciler")
         except (InfrastructureError, ValueError):
             raise
         except Exception as exc:
@@ -210,6 +212,40 @@ class KubernetesInfrastructure:
             )
         return result
 
+    def _deploy_facilities_vendor_stack(
+        self,
+        stack: StackRequest,
+        components: Mapping[str, WorkloadRequest],
+    ) -> StackObservation:
+        definition = stack_definition(stack.stack_id)
+        if definition is None:
+            raise InfrastructureError("Stack definition is unavailable")
+        expected = {service.id for service in definition.services}
+        if set(components) != expected:
+            raise InfrastructureError("Stack component inventory does not match catalog")
+
+        observations = {
+            service.id: self._apply_profile_workload(
+                components[service.id],
+                reference_profile="facilities-vendor",
+                api_upstream="vendor-api",
+                database_upstream="vendor-database",
+                namespace_purpose="facilities-vendor-stack",
+            )
+            for service in definition.services
+        }
+        result = StackObservation(
+            "running"
+            if all(item.state == "running" for item in observations.values())
+            else "pending",
+            observations,
+        )
+        if result.state != "running":
+            raise InfrastructurePending(
+                "Facilities vendor stack has not become fully available", result
+            )
+        return result
+
     def _apply_namespace(self, name: str, body: dict):
         return self.core.patch_namespace(
             name=name,
@@ -274,6 +310,11 @@ class KubernetesInfrastructure:
             except self.ApiException as exc:
                 if exc.status == 404:
                     self._ensure_namespace_controls(namespace)
+                    self._restart_deployment_after_restore(
+                        workload,
+                        namespace,
+                        None,
+                    )
                     return ContainmentObservation("restored", None, None)
                 raise
             metadata = current.get("metadata", {})
@@ -302,6 +343,11 @@ class KubernetesInfrastructure:
             except self.ApiException as exc:
                 if exc.status == 404:
                     self._ensure_namespace_controls(namespace)
+                    self._restart_deployment_after_restore(
+                        workload,
+                        namespace,
+                        metadata.get("uid"),
+                    )
                     return ContainmentObservation("restored", None, None)
                 raise
             raise InfrastructurePending("Cilium quarantine policy deletion is still in progress")
@@ -309,6 +355,30 @@ class KubernetesInfrastructure:
             raise
         except Exception as exc:
             raise self._translate(exc) from exc
+
+    def _restart_deployment_after_restore(
+        self,
+        workload: WorkloadRequest,
+        namespace: str,
+        policy_uid: str | None,
+    ) -> None:
+        """Replace a pod that may have failed while its DNS was quarantined."""
+        current = self.apps.read_namespaced_deployment(workload.name, namespace)
+        self._check_preconditions(workload, current)
+        marker = policy_uid or "policy-absent"
+        body = {
+            "metadata": {"resourceVersion": current.metadata.resource_version},
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "securecloud.io/restored-from-policy": marker,
+                        }
+                    }
+                }
+            },
+        }
+        self.apps.patch_namespaced_deployment(workload.name, namespace, body)
 
     @staticmethod
     def _quarantine_policy(workload: WorkloadRequest, namespace: str, name: str) -> dict:
@@ -342,9 +412,38 @@ class KubernetesInfrastructure:
         )
 
     def _deploy(self, workload: WorkloadRequest) -> WorkloadObservation:
+        reference_profile = (
+            workload.tenant_id
+            if workload.tenant_id in REFERENCE_PROFILES
+            else None
+        )
+        result = self._apply_profile_workload(
+            workload,
+            reference_profile=reference_profile,
+        )
+        if result.state != "running":
+            raise InfrastructurePending(
+                "Deployment has not become available",
+                result,
+            )
+        return result
+
+    def _apply_profile_workload(
+        self,
+        workload: WorkloadRequest,
+        *,
+        reference_profile: str | None,
+        api_upstream: str | None = None,
+        database_upstream: str | None = None,
+        namespace_purpose: str | None = None,
+    ) -> WorkloadObservation:
         template = TEMPLATES[workload.template]
         namespace = tenant_namespace(workload.tenant_id)
-        self._ensure_namespace(namespace, workload.tenant_id)
+        self._ensure_namespace(
+            namespace,
+            workload.tenant_id,
+            purpose=namespace_purpose,
+        )
         self._ensure_namespace_controls(namespace)
         labels = {
             "app.kubernetes.io/managed-by": "securecloud",
@@ -355,13 +454,16 @@ class KubernetesInfrastructure:
             "securecloud.io/workload-id": workload.id,
             "securecloud.io/tenant-id": workload.tenant_id,
         }
-        reference_profile = workload.tenant_id if workload.tenant_id in REFERENCE_PROFILES else None
         if reference_profile and workload.template in {"api", "database"}:
             self._ensure_reference_secret(namespace, annotations)
         if reference_profile and workload.template == "database":
             self._ensure_database_storage(namespace, workload.name, labels, annotations)
         container, pod_security_context, volumes = self._container_spec(
-            workload, template, reference_profile
+            workload,
+            template,
+            reference_profile,
+            api_upstream=api_upstream,
+            database_upstream=database_upstream,
         )
         deployment = {
             "apiVersion": "apps/v1",
@@ -396,12 +498,11 @@ class KubernetesInfrastructure:
         result = self._apply(self.apps.patch_namespaced_deployment, workload.name, namespace, deployment)
         self._apply(self.core.patch_namespaced_service, workload.name, namespace, service)
         ready = self._deployment_ready(result)
-        if not ready:
-            raise InfrastructurePending(
-                "Deployment has not become available",
-                WorkloadObservation("pending", result.metadata.uid, result.metadata.resource_version),
-            )
-        return WorkloadObservation("running", result.metadata.uid, result.metadata.resource_version)
+        return WorkloadObservation(
+            "running" if ready else "pending",
+            result.metadata.uid,
+            result.metadata.resource_version,
+        )
 
     @staticmethod
     def _deployment_ready(deployment) -> bool:
@@ -421,6 +522,9 @@ class KubernetesInfrastructure:
         workload: WorkloadRequest,
         template: Template,
         reference_profile: str | None,
+        *,
+        api_upstream: str | None = None,
+        database_upstream: str | None = None,
     ) -> tuple[dict, dict, list[dict]]:
         security_context = {
             "allowPrivilegeEscalation": False,
@@ -455,7 +559,10 @@ class KubernetesInfrastructure:
             container.update({
                 "image": "docker.io/securecloud/reference-web:0.2.0",
                 "args": [],
-                "env": [{"name": "API_UPSTREAM", "value": f"{reference_profile}-api"}],
+                "env": [{
+                    "name": "API_UPSTREAM",
+                    "value": api_upstream or f"{reference_profile}-api",
+                }],
                 "ports": [{"name": "service", "containerPort": 8080, "protocol": "TCP"}],
                 "readinessProbe": {"httpGet": {"path": "/", "port": "service"}, "initialDelaySeconds": 1, "periodSeconds": 3},
                 "livenessProbe": {"httpGet": {"path": "/", "port": "service"}, "initialDelaySeconds": 5, "periodSeconds": 10},
@@ -473,11 +580,18 @@ class KubernetesInfrastructure:
         secret_password = {"secretKeyRef": {"name": REFERENCE_SECRET, "key": "password"}}
         if workload.template == "api":
             container.update({
-                "image": "docker.io/securecloud/reference-api:0.2.0",
+                "image": (
+                    "docker.io/securecloud/reference-api:0.3.0"
+                    if reference_profile == "facilities-vendor"
+                    else "docker.io/securecloud/reference-api:0.2.0"
+                ),
                 "args": [],
                 "env": [
                     {"name": "APP_PROFILE", "value": reference_profile},
-                    {"name": "PGHOST", "value": f"{reference_profile}-database"},
+                    {
+                        "name": "PGHOST",
+                        "value": database_upstream or f"{reference_profile}-database",
+                    },
                     {"name": "PGDATABASE", "value": "securecloud"},
                     {"name": "PGUSER", "value": "securecloud"},
                     {"name": "PGPASSWORD", "valueFrom": secret_password},
@@ -582,20 +696,29 @@ class KubernetesInfrastructure:
         if workload.kubernetes_uid != resource.metadata.uid:
             raise InfrastructureConflict("Kubernetes UID changed")
 
-    def _ensure_namespace(self, namespace: str, tenant_id: str):
+    def _ensure_namespace(
+        self,
+        namespace: str,
+        tenant_id: str,
+        *,
+        purpose: str | None = None,
+    ):
+        labels = {
+            "app.kubernetes.io/managed-by": "securecloud",
+            "securecloud.io/tenant": sha256(tenant_id.encode()).hexdigest()[:16],
+            "pod-security.kubernetes.io/enforce": "restricted",
+            "pod-security.kubernetes.io/enforce-version": "latest",
+            "pod-security.kubernetes.io/audit": "restricted",
+            "pod-security.kubernetes.io/warn": "restricted",
+        }
+        if purpose:
+            labels["securecloud.io/purpose"] = purpose
         body = {
             "apiVersion": "v1",
             "kind": "Namespace",
             "metadata": {
                 "name": namespace,
-                "labels": {
-                    "app.kubernetes.io/managed-by": "securecloud",
-                    "securecloud.io/tenant": sha256(tenant_id.encode()).hexdigest()[:16],
-                    "pod-security.kubernetes.io/enforce": "restricted",
-                    "pod-security.kubernetes.io/enforce-version": "latest",
-                    "pod-security.kubernetes.io/audit": "restricted",
-                    "pod-security.kubernetes.io/warn": "restricted",
-                },
+                "labels": labels,
                 "annotations": {"securecloud.io/tenant-id": tenant_id},
             },
         }

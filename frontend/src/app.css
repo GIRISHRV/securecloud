@@ -428,6 +428,7 @@ select:focus-visible,
 
 .scope-selector {
   display: flex;
+  margin-left: auto;
   align-items: center;
   gap: 7px;
   color: #52525b;
@@ -1063,6 +1064,20 @@ td small {
   font-size: 10px;
 }
 
+.table-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.workload-table th:last-child,
+.workload-table td:last-child {
+  width: 1%;
+  text-align: right;
+}
+
 .table-toolbar {
   display: flex;
   align-items: center;
@@ -1086,6 +1101,14 @@ td small {
   padding: 11px 14px;
   color: var(--subtle);
   font-size: 10px;
+}
+
+.panel-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .count {
@@ -1193,8 +1216,10 @@ dd {
 
 .zone-heading {
   display: flex;
+  align-self: start;
   align-items: center;
   gap: 8px;
+  padding-top: 28px;
   font-size: 11px;
 }
 
@@ -1211,18 +1236,47 @@ dd {
   font-size: 8px;
 }
 
-.topology-flow,
-.topology-step {
-  display: flex;
-  align-items: center;
+.topology-flow {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.8fr) minmax(300px, 2fr) minmax(170px, 0.8fr);
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
 }
 
-.topology-flow {
+.topology-tier {
   min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fafafa;
 }
-.topology-step {
-  min-width: 0;
-  flex: 1;
+
+.topology-tier-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 9px;
+  color: #52525b;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.topology-tier-heading span:last-child {
+  color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.topology-tier-nodes {
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+}
+
+.topology-tier:nth-child(2) .topology-tier-nodes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .topology-node {
@@ -1284,23 +1338,6 @@ dd {
   font-size: 8px;
 }
 
-.topology-link {
-  position: relative;
-  width: 42px;
-  height: 1px;
-  flex: 0 0 auto;
-  background: #c7cbd1;
-}
-
-.topology-link span {
-  position: absolute;
-  top: 5px;
-  width: 100%;
-  color: var(--subtle);
-  font-size: 7px;
-  text-align: center;
-}
-
 .topology-legend {
   color: var(--subtle);
   font-size: 8px;
@@ -1317,11 +1354,13 @@ dd {
   padding: 9px;
 }
 
-.legend-line {
+.legend-group {
   display: inline-block;
-  width: 14px;
-  height: 1px;
-  background: #a1a1aa;
+  width: 9px;
+  height: 9px;
+  border: 1px solid #a1a1aa;
+  border-radius: 2px;
+  background: #fafafa;
 }
 
 .zone-empty {
@@ -1880,10 +1919,14 @@ dd {
 
   .zone-heading {
     margin-bottom: 10px;
+    padding-top: 0;
   }
   .topology-flow {
-    overflow-x: auto;
-    padding-bottom: 3px;
+    grid-template-columns: 1fr;
+  }
+
+  .topology-tier:nth-child(2) .topology-tier-nodes {
+    grid-template-columns: 1fr;
   }
 
   .trace-heading {

@@ -25,6 +25,31 @@ def test_profiles_expose_only_their_allowlisted_resources():
     ]
 
 
+def test_facilities_vendor_profile_supports_a_real_work_order_flow():
+    vendor = client("facilities-vendor")
+    resources = vendor.get("/api/profile").json()["resources"]
+    assert [item["id"] for item in resources] == [
+        "work_orders",
+        "technicians",
+        "service_reports",
+    ]
+
+    created = vendor.post(
+        "/api/resources/work_orders",
+        json={
+            "reference": "WO-2026-041",
+            "site": "Retail distribution centre",
+            "scheduled_at": "2026-11-19T09:30",
+            "status": "Approved",
+        },
+    )
+    assert created.status_code == 201
+    assert vendor.get("/api/summary").json()["counts"]["work_orders"] == 1
+    assert vendor.get("/api/resources/work_orders").json()["items"] == [
+        created.json()
+    ]
+
+
 def test_create_update_list_delete_and_summary_flow():
     api = client()
     created = api.post(

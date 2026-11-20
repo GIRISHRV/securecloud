@@ -50,8 +50,6 @@ class MemoryInfrastructure:
             return ContainmentObservation("quarantined", f"test-policy-{workload.id}", "1")
         self.quarantined.discard(workload.id)
         return ContainmentObservation("restored", None, None)
-    StackObservation,
-    StackRequest,
 
     def reconcile_stack(
         self,
