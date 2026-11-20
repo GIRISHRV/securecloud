@@ -24,6 +24,21 @@ test("captures the live presentation workflow", async ({ page }) => {
 
   await page
     .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("link", { name: "Demo Flow", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "From workload traffic to recovery" }),
+  ).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Demo steps" }).getByRole("button"))
+    .toHaveCount(6);
+  await expect(page.getByText("Demo ready", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: "../runtime/presentation-demo-flow.png",
+    fullPage: true,
+  });
+
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
     .getByRole("link", { name: "Tenants & Workloads", exact: true })
     .click();
   await page
