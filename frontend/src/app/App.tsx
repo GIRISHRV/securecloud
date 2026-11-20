@@ -396,7 +396,7 @@ function ConsoleApp() {
                   busy={busy}
                 />
               )}
-              {view === "demo" && <DemoFlow navigate={navigate} />}
+              {view === "demo" && <DemoFlow />}
               {view === "workloads" && (
                 <Workloads
                   onDeploy={() => navigate("catalog")}

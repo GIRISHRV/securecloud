@@ -32,6 +32,29 @@ test("captures the live presentation workflow", async ({ page }) => {
   await expect(page.getByRole("navigation", { name: "Demo steps" }).getByRole("button"))
     .toHaveCount(6);
   await expect(page.getByText("Demo ready", { exact: true })).toBeVisible();
+  await expect(page.getByTitle("RetailCo application")).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "Demo steps" })
+    .getByRole("button", { name: /Normal traffic is permitted/ })
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Live traffic events" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "Demo steps" })
+    .getByRole("button", { name: /Temporal risk is calculated/ })
+    .click();
+  await expect(
+    page.getByRole("table", { name: "Demo temporal risk evidence" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "Demo steps" })
+    .getByRole("button", { name: /The workload is contained/ })
+    .click();
+  await expect(page.getByText("Triggering evidence", { exact: true })).toBeVisible();
   await page.screenshot({
     path: "../runtime/presentation-demo-flow.png",
     fullPage: true,
