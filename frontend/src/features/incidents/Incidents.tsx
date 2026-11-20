@@ -24,6 +24,7 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
       filter === "all" ||
       (filter === "active" ? i.status !== "restored" : i.status === "restored"),
   );
+  const risk = data.security?.observations.slice(-8).reverse() ?? [];
   const selected = incidents.find((i) => i.id === selectedId) ?? incidents[0];
   return (
     <>
@@ -64,6 +65,55 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
           </button>
         ))}
       </div>
+      {data.security && (
+        <Panel
+          title="Temporal risk"
+          description={`${data.security.detector} · live graph score compared with the edge-frequency baseline`}
+          action={
+            <Badge tone={data.security.telemetryEnabled ? "green" : "neutral"}>
+              {data.security.telemetryEnabled ? "Telemetry live" : "Telemetry off"}
+            </Badge>
+          }
+        >
+          {risk.length ? (
+            <div className="risk-table-wrap">
+              <table className="risk-table" aria-label="Recent temporal graph risk">
+                <thead>
+                  <tr>
+                    <th>Connection</th>
+                    <th>GNN</th>
+                    <th>Accumulated</th>
+                    <th>Baseline</th>
+                    <th>Decision</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {risk.map((item) => (
+                    <tr key={`${item.windowStart}-${item.sourceId}-${item.destinationId}`}>
+                      <td>
+                        <strong>{item.sourceName}</strong>
+                        <span> → {item.destinationName}</span>
+                      </td>
+                      <td>{item.anomalyScore.toFixed(3)}</td>
+                      <td>
+                        {item.accumulatedRisk.toFixed(3)} / {item.threshold.toFixed(3)}
+                      </td>
+                      <td>{item.baselineScore.toFixed(3)}</td>
+                      <td>
+                        <Badge tone={item.response === "containment-recommended" ? "red" : "neutral"}>
+                          {item.response === "containment-recommended" ? "Respond" : "Observe"}
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="info-note">Risk history appears after resolved workload traffic is scored.</p>
+          )}
+        </Panel>
+      )}
       {!selected ? (
         <section className="panel">
           <Empty

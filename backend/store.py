@@ -133,7 +133,24 @@ CREATE TABLE IF NOT EXISTS detection_findings (
  threshold REAL NOT NULL,
  supporting_facts_json TEXT NOT NULL,
  event_ids_json TEXT NOT NULL,
- created_at REAL NOT NULL
+ created_at REAL NOT NULL,
+ accumulated_risk REAL NOT NULL DEFAULT 0,
+ baseline_score REAL NOT NULL DEFAULT 0,
+ response TEXT NOT NULL DEFAULT 'alert'
+);
+CREATE TABLE IF NOT EXISTS risk_observations (
+ model_version TEXT NOT NULL,
+ window_start REAL NOT NULL,
+ window_end REAL NOT NULL,
+ source_id TEXT NOT NULL,
+ destination_id TEXT NOT NULL,
+ anomaly_score REAL NOT NULL,
+ accumulated_risk REAL NOT NULL,
+ baseline_score REAL NOT NULL,
+ threshold REAL NOT NULL,
+ corroborated INTEGER NOT NULL,
+ response TEXT NOT NULL CHECK(response IN ('observe','containment-recommended')),
+ PRIMARY KEY(model_version,window_start,source_id,destination_id)
 );
 """
 
@@ -150,6 +167,16 @@ class Store:
             }
             if "stack_deployment_id" not in columns:
                 db.execute("ALTER TABLE workloads ADD COLUMN stack_deployment_id TEXT")
+            finding_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(detection_findings)")
+            }
+            for name, definition in (
+                ("accumulated_risk", "REAL NOT NULL DEFAULT 0"),
+                ("baseline_score", "REAL NOT NULL DEFAULT 0"),
+                ("response", "TEXT NOT NULL DEFAULT 'alert'"),
+            ):
+                if name not in finding_columns:
+                    db.execute(f"ALTER TABLE detection_findings ADD COLUMN {name} {definition}")
 
     @contextmanager
     def connect(self):
@@ -796,8 +823,9 @@ class Store:
             db.execute(
                 """INSERT INTO detection_findings
                    (id,incident_id,model_version,window_start,window_end,source_id,destination_id,
-                    predicted_probability,anomaly_score,threshold,supporting_facts_json,event_ids_json,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    predicted_probability,anomaly_score,threshold,supporting_facts_json,event_ids_json,
+                    created_at,accumulated_risk,baseline_score,response)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     finding.id,
                     incident_id,
@@ -812,10 +840,74 @@ class Store:
                     json.dumps(finding.supporting_facts, sort_keys=True),
                     json.dumps(finding.event_ids),
                     finding.created_at,
+                    finding.accumulated_risk,
+                    finding.baseline_score,
+                    finding.response,
                 ),
             )
             audit(db, f"system.detector:{finding.model_version}", finding.source_tenant, "incident.created", incident_id)
         return True
+
+    def record_risk_observations(self, observations) -> int:
+        """Persist replay-safe model scores for portal history and evaluation."""
+        inserted = 0
+        with self.connect() as db:
+            for observation in observations:
+                result = db.execute(
+                    """INSERT OR IGNORE INTO risk_observations
+                       (model_version,window_start,window_end,source_id,destination_id,
+                        anomaly_score,accumulated_risk,baseline_score,threshold,corroborated,response)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        observation.model_version,
+                        observation.window_start,
+                        observation.window_end,
+                        observation.source_id,
+                        observation.destination_id,
+                        observation.anomaly_score,
+                        observation.accumulated_risk,
+                        observation.baseline_score,
+                        observation.threshold,
+                        int(observation.corroborated),
+                        observation.response,
+                    ),
+                )
+                inserted += result.rowcount
+        return inserted
+
+    def risk_observations(self, limit: int = 120) -> list[dict]:
+        if limit <= 0 or limit > 1_000:
+            raise ValueError("Invalid risk observation limit")
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT risk_observations.*, source.tenant_id,
+                          source.name AS source_name,
+                          destination.name AS destination_name
+                   FROM risk_observations
+                   LEFT JOIN workloads source ON source.id=risk_observations.source_id
+                   LEFT JOIN workloads destination ON destination.id=risk_observations.destination_id
+                   ORDER BY window_end DESC,source_id,destination_id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "modelVersion": row["model_version"],
+                "windowStart": row["window_start"],
+                "windowEnd": row["window_end"],
+                "sourceId": row["source_id"],
+                "destinationId": row["destination_id"],
+                "sourceName": row["source_name"] or row["source_id"],
+                "destinationName": row["destination_name"] or row["destination_id"],
+                "anomalyScore": row["anomaly_score"],
+                "accumulatedRisk": row["accumulated_risk"],
+                "baselineScore": row["baseline_score"],
+                "threshold": row["threshold"],
+                "corroborated": bool(row["corroborated"]),
+                "response": row["response"],
+                "tenantId": row["tenant_id"],
+            }
+            for row in reversed(rows)
+        ]
 
     def detection_findings(self) -> list[dict]:
         with self.connect() as db:

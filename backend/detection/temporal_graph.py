@@ -16,7 +16,13 @@ from torch_geometric.nn import ChebConv
 from backend.telemetry.windows import GraphSnapshot
 
 
-MODEL_VERSION = "gconvgru-link-v1"
+MODEL_VERSION = "gconvgru-link-v2"
+RELATION_FEATURE_NAMES = (
+    "same_tenant",
+    "approved_intent",
+    "policy_denied_ratio",
+    "cross_tenant",
+)
 
 
 @dataclass(frozen=True)
@@ -92,30 +98,35 @@ class TemporalLinkPredictor(torch.nn.Module):
     def __init__(self, feature_count: int, hidden_channels: int = 16):
         super().__init__()
         self.encoder = GConvGRUCell(feature_count, hidden_channels, K=2)
-        self.bilinear = torch.nn.Parameter(torch.empty(hidden_channels, hidden_channels))
-        self.bias = torch.nn.Parameter(torch.zeros(1))
-        torch.nn.init.xavier_uniform_(self.bilinear)
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(hidden_channels * 2 + len(RELATION_FEATURE_NAMES), hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, 1),
+        )
 
     def encode(self, x: Tensor, edge_index: Tensor, edge_weight: Tensor, hidden: Tensor | None) -> Tensor:
         return self.encoder(x, edge_index, edge_weight, hidden)
 
-    def decode(self, hidden: Tensor, pairs: Tensor) -> Tensor:
+    def decode(self, hidden: Tensor, pairs: Tensor, relations: Tensor) -> Tensor:
         source = hidden[pairs[0]]
         destination = hidden[pairs[1]]
-        return torch.sum((source @ self.bilinear) * destination, dim=1) + self.bias
+        return self.decoder(torch.cat((source, destination, relations), dim=1)).squeeze(1)
 
 
 class GraphTensorizer:
-    def __init__(self, workloads: list[WorkloadDescriptor]):
+    def __init__(
+        self,
+        workloads: list[WorkloadDescriptor],
+        approved_edges: set[tuple[str, str]] | None = None,
+    ):
         if not workloads or len({item.id for item in workloads}) != len(workloads):
             raise ValueError("Workload descriptors must be non-empty and unique")
         self.workloads = tuple(sorted(workloads, key=lambda item: item.id))
         self.index = {item.id: position for position, item in enumerate(self.workloads)}
-        self.tenants = tuple(sorted({item.tenant_id for item in self.workloads}))
+        self.approved_edges = frozenset(approved_edges or set())
         self.templates = ("web", "api", "database")
         self.feature_names = (
             *(f"template:{name}" for name in self.templates),
-            *(f"tenant:{name}" for name in self.tenants),
             "inbound_log_count",
             "outbound_log_count",
             "denied_ratio",
@@ -124,6 +135,7 @@ class GraphTensorizer:
             "running",
             "quarantined",
         )
+        self.relation_feature_names = RELATION_FEATURE_NAMES
 
     def tensors(self, snapshot: GraphSnapshot) -> tuple[Tensor, Tensor, Tensor]:
         node_count = len(self.workloads)
@@ -151,7 +163,6 @@ class GraphTensorizer:
             total = outbound[position]
             features.append([
                 *(float(workload.template == name) for name in self.templates),
-                *(float(workload.tenant_id == tenant) for tenant in self.tenants),
                 log1p(inbound[position]),
                 log1p(outbound[position]),
                 denied[position] / total if total else 0.0,
@@ -179,6 +190,36 @@ class GraphTensorizer:
         )
         return torch.tensor(valid, dtype=torch.long).T.contiguous() if valid else torch.empty((2, 0), dtype=torch.long)
 
+    def relation_features(
+        self,
+        snapshot: GraphSnapshot,
+        edges: set[tuple[str, str]],
+    ) -> Tensor:
+        observed = {
+            (edge.source_id, edge.destination_id): edge for edge in snapshot.edges
+        }
+        descriptors = {item.id: item for item in self.workloads}
+        rows: list[list[float]] = []
+        for source, destination in sorted(
+            edge for edge in edges
+            if edge[0] in self.index and edge[1] in self.index and edge[0] != edge[1]
+        ):
+            edge = observed.get((source, destination))
+            total = edge.flow_count if edge else 0
+            denied_ratio = edge.denied_count / total if total else 0.0
+            same_tenant = descriptors[source].tenant_id == descriptors[destination].tenant_id
+            rows.append([
+                float(same_tenant),
+                float((source, destination) in self.approved_edges),
+                denied_ratio,
+                float(not same_tenant),
+            ])
+        return (
+            torch.tensor(rows, dtype=torch.float32)
+            if rows
+            else torch.empty((0, len(RELATION_FEATURE_NAMES)), dtype=torch.float32)
+        )
+
     def edge_set(self, snapshot: GraphSnapshot) -> set[tuple[str, str]]:
         return {
             (edge.source_id, edge.destination_id)
@@ -204,9 +245,10 @@ class TemporalGraphEngine:
         hidden_channels: int = 16,
         *,
         seed: int = 0,
+        approved_edges: set[tuple[str, str]] | None = None,
     ):
         torch.manual_seed(seed)
-        self.tensorizer = GraphTensorizer(workloads)
+        self.tensorizer = GraphTensorizer(workloads, approved_edges)
         self.model = TemporalLinkPredictor(len(self.tensorizer.feature_names), hidden_channels)
         self.threshold: float | None = None
 
@@ -216,6 +258,7 @@ class TemporalGraphEngine:
         path: Path,
         workloads: list[WorkloadDescriptor],
         *,
+        approved_edges: set[tuple[str, str]] | None = None,
         maximum_bytes: int = 10 * 1024 * 1024,
     ) -> "TemporalGraphEngine":
         """Load a local weights-only checkpoint after validating its schema."""
@@ -249,23 +292,20 @@ class TemporalGraphEngine:
         threshold = training.get("threshold")
         if not isinstance(threshold, (int, float)) or not 0.0 <= float(threshold) <= 1.0:
             raise ValueError("Temporal model threshold is invalid")
-        bilinear = state.get("bilinear")
-        if not isinstance(bilinear, Tensor) or bilinear.ndim != 2 or bilinear.shape[0] != bilinear.shape[1]:
+        decoder_weight = state.get("decoder.0.weight")
+        if not isinstance(decoder_weight, Tensor) or decoder_weight.ndim != 2:
             raise ValueError("Temporal model dimensions are invalid")
-        calibrated_tenants = {
-            name.removeprefix("tenant:")
-            for name in feature_names
-            if name.startswith("tenant:")
-        }
-        covered_workloads = [
-            workload for workload in workloads
-            if workload.tenant_id in calibrated_tenants
-        ]
-        if not covered_workloads:
-            raise ValueError("No active workloads are covered by the temporal model")
-        engine = cls(covered_workloads, hidden_channels=int(bilinear.shape[0]), seed=0)
+        hidden_channels = int(decoder_weight.shape[0])
+        engine = cls(
+            workloads,
+            hidden_channels=hidden_channels,
+            seed=0,
+            approved_edges=approved_edges,
+        )
         if feature_names != list(engine.tensorizer.feature_names):
             raise ValueError("Temporal model feature schema does not match the active lab")
+        if artifact.get("relation_feature_names") != list(RELATION_FEATURE_NAMES):
+            raise ValueError("Temporal model relationship schema does not match the active lab")
         try:
             engine.model.load_state_dict(state, strict=True)
         except (RuntimeError, TypeError) as exc:
@@ -304,8 +344,12 @@ class TemporalGraphEngine:
                 positive_pairs = self.tensorizer.pairs(positives)
                 negative_pairs = self.tensorizer.pairs(negatives)
                 pairs = torch.cat((positive_pairs, negative_pairs), dim=1)
+                relations = torch.cat((
+                    self.tensorizer.relation_features(following, positives),
+                    self.tensorizer.relation_features(following, negatives),
+                ))
                 labels = torch.cat((torch.ones(positive_pairs.shape[1]), torch.zeros(negative_pairs.shape[1])))
-                losses.append(F.binary_cross_entropy_with_logits(self.model.decode(hidden, pairs), labels))
+                losses.append(F.binary_cross_entropy_with_logits(self.model.decode(hidden, pairs, relations), labels))
             loss = torch.stack(losses).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
@@ -334,7 +378,8 @@ class TemporalGraphEngine:
             for snapshot in calibration:
                 pairs = self.tensorizer.pairs(self.tensorizer.edge_set(snapshot))
                 if pairs.shape[1]:
-                    probabilities = torch.sigmoid(self.model.decode(hidden, pairs))
+                    relations = self.tensorizer.relation_features(snapshot, self.tensorizer.edge_set(snapshot))
+                    probabilities = torch.sigmoid(self.model.decode(hidden, pairs, relations))
                     anomalies.extend(float(1 - value) for value in probabilities)
                 x, edge_index, edge_weight = self.tensorizer.tensors(snapshot)
                 hidden = self.model.encode(x, edge_index, edge_weight, hidden)
@@ -362,25 +407,40 @@ class TemporalGraphEngine:
         pairs = self.tensorizer.pairs(set(edges))
         self.model.eval()
         with torch.no_grad():
-            probabilities = torch.sigmoid(self.model.decode(hidden, pairs)) if edges else torch.empty(0)
+            relations = self.tensorizer.relation_features(snapshot, set(edges))
+            probabilities = torch.sigmoid(self.model.decode(hidden, pairs, relations)) if edges else torch.empty(0)
             x, edge_index, edge_weight = self.tensorizer.tensors(snapshot)
             next_hidden = self.model.encode(x, edge_index, edge_weight, hidden)
-        scores = tuple(
-            TemporalEdgeScore(
+        scores = []
+        for position, ((source, destination), probability) in enumerate(
+            zip(edges, probabilities)
+        ):
+            learned_novelty = 1.0 - float(probability)
+            approved = float(relations[position, 1])
+            denied_ratio = float(relations[position, 2])
+            cross_tenant = float(relations[position, 3])
+            # Relational facts do not replace the learned score. They bound the
+            # risk floor so a novel denied/tenant-crossing edge cannot be hidden
+            # by a confident link prediction.
+            anomaly = max(
+                learned_novelty,
+                0.85 * denied_ratio,
+                0.90 * cross_tenant * (1.0 - approved),
+            )
+            scores.append(TemporalEdgeScore(
                 source,
                 destination,
                 float(probability),
-                1.0 - float(probability),
-                1.0 - float(probability) >= self.threshold,
-            )
-            for (source, destination), probability in zip(edges, probabilities)
-        )
-        return scores, next_hidden
+                anomaly,
+                anomaly >= self.threshold,
+            ))
+        return tuple(scores), next_hidden
 
     def artifact(self, result: TemporalTrainingResult) -> dict:
         return {
             "model_version": MODEL_VERSION,
             "feature_names": list(self.tensorizer.feature_names),
-            "node_ids": [item.id for item in self.tensorizer.workloads],
+            "relation_feature_names": list(self.tensorizer.relation_feature_names),
+            "training_node_count": len(self.tensorizer.workloads),
             "training": asdict(result),
         }

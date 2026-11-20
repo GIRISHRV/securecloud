@@ -1,0 +1,32 @@
+{
+  "feature_names": [
+    "template:web",
+    "template:api",
+    "template:database",
+    "inbound_log_count",
+    "outbound_log_count",
+    "denied_ratio",
+    "unique_destination_count",
+    "unique_destination_port_count",
+    "running",
+    "quarantined"
+  ],
+  "model_version": "gconvgru-link-v2",
+  "relation_feature_names": [
+    "same_tenant",
+    "approved_intent",
+    "policy_denied_ratio",
+    "cross_tenant"
+  ],
+  "training": {
+    "calibration_windows": 4,
+    "epochs": 80,
+    "final_loss": 0.011099147610366344,
+    "seed": 11,
+    "test_windows": 4,
+    "threshold": 0.5,
+    "training_time_ms": 9141.816599993035,
+    "training_windows": 12
+  },
+  "training_node_count": 11
+}

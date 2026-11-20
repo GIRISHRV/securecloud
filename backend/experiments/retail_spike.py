@@ -52,8 +52,12 @@ def _namespace(namespace: str, tenant_id: str, purpose: str) -> dict:
     }
 
 
-def _controls(namespace: str) -> list[dict]:
-    return [
+def _controls(
+    namespace: str,
+    workload_ids: dict[str, str],
+    service_intents: tuple[tuple[str, str, int], ...],
+) -> list[dict]:
+    controls = [
         {
             "apiVersion": "v1",
             "kind": "ResourceQuota",
@@ -77,17 +81,6 @@ def _controls(namespace: str) -> list[dict]:
         {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
-            "metadata": {"name": "allow-tenant-internal", "namespace": namespace},
-            "spec": {
-                "podSelector": {},
-                "policyTypes": ["Ingress", "Egress"],
-                "ingress": [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}}}]}],
-                "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}}}]}],
-            },
-        },
-        {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
             "metadata": {"name": "allow-dns", "namespace": namespace},
             "spec": {
                 "podSelector": {},
@@ -105,6 +98,46 @@ def _controls(namespace: str) -> list[dict]:
             },
         },
     ]
+    for index, (source, destination, port) in enumerate(service_intents):
+        source_label = sha256(workload_ids.get(source, source).encode()).hexdigest()[:16]
+        destination_label = sha256(
+            workload_ids.get(destination, destination).encode()
+        ).hexdigest()[:16]
+        controls.extend((
+            {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {
+                    "name": f"intent-{index:02d}-{source[:16]}-egress",
+                    "namespace": namespace,
+                },
+                "spec": {
+                    "podSelector": {"matchLabels": {"securecloud.io/workload": source_label}},
+                    "policyTypes": ["Egress"],
+                    "egress": [{
+                        "to": [{"podSelector": {"matchLabels": {"securecloud.io/workload": destination_label}}}],
+                        "ports": [{"protocol": "TCP", "port": port}],
+                    }],
+                },
+            },
+            {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {
+                    "name": f"intent-{index:02d}-{destination[:16]}-ingress",
+                    "namespace": namespace,
+                },
+                "spec": {
+                    "podSelector": {"matchLabels": {"securecloud.io/workload": destination_label}},
+                    "policyTypes": ["Ingress"],
+                    "ingress": [{
+                        "from": [{"podSelector": {"matchLabels": {"securecloud.io/workload": source_label}}}],
+                        "ports": [{"protocol": "TCP", "port": port}],
+                    }],
+                },
+            },
+        ))
+    return controls
 
 
 def prepare_documents(
@@ -115,6 +148,7 @@ def prepare_documents(
     purpose: str = "retail-feasibility",
     workload_ids: dict[str, str] | None = None,
     workload_templates: dict[str, str] | None = None,
+    service_intents: tuple[tuple[str, str, int], ...] = (),
 ) -> tuple[list[dict], dict]:
     source_bytes = source.read_bytes()
     if sha256(source_bytes).hexdigest() != UPSTREAM_MANIFEST_SHA256:
@@ -181,7 +215,7 @@ def prepare_documents(
                 images.add(container["image"])
         documents.append(item)
 
-    documents.extend(_controls(namespace))
+    documents.extend(_controls(namespace, workload_ids or {}, service_intents))
     summary = {
         "upstream_version": UPSTREAM_VERSION,
         "upstream_commit": UPSTREAM_COMMIT,
@@ -190,6 +224,7 @@ def prepare_documents(
         "deployment_count": len(deployments),
         "images": sorted(images),
         "external_service_removed": True,
+        "explicit_service_intents": len(service_intents),
     }
     return documents, summary
 

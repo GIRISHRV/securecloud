@@ -83,9 +83,11 @@ def test_checkpoint_load_and_live_pipeline_preserve_model_evidence(tmp_path):
         WORKLOADS,
     )
     assert findings
-    assert all(item.model_version == "gconvgru-link-v1" for item in findings)
+    assert all(item.model_version == "gconvgru-link-v2" for item in findings)
     assert all(item.supporting_facts["cross_tenant"] for item in findings)
     assert all(0 <= item.predicted_probability <= 1 for item in findings)
+    assert pipeline.last_observations
+    assert all(0 <= item.accumulated_risk <= 1 for item in pipeline.last_observations)
 
 
 def test_checkpoint_loader_rejects_non_checkpoint(tmp_path):
@@ -95,7 +97,7 @@ def test_checkpoint_loader_rejects_non_checkpoint(tmp_path):
         TemporalGraphEngine.from_checkpoint(invalid, WORKLOADS)
 
 
-def test_checkpoint_ignores_tenants_outside_its_calibrated_lab(tmp_path):
+def test_checkpoint_supports_tenants_outside_its_training_lab(tmp_path):
     history = build_graph_snapshots(benign_training_flows(19), window_seconds=30)
     engine = TemporalGraphEngine(WORKLOADS, hidden_channels=4, seed=19)
     result = engine.fit(history, seed=19, epochs=1)
@@ -108,4 +110,7 @@ def test_checkpoint_ignores_tenants_outside_its_calibrated_lab(tmp_path):
         checkpoint,
         [*WORKLOADS, WorkloadDescriptor("testing-web", "testing", "web")],
     )
-    assert "testing-web" not in loaded.tensorizer.index
+    assert "testing-web" in loaded.tensorizer.index
+    assert not any(
+        name.startswith("tenant:") for name in loaded.tensorizer.feature_names
+    )

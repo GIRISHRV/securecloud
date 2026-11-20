@@ -535,7 +535,7 @@ Run at least 30 repetitions per scenario and five model seeds. Export raw events
 
 ### 9.4 Implemented evaluation artifacts
 
-The current offline runner is `python -m backend.experiments.runner`. It executes the 11 allowlisted scenarios with 30 repetitions and five seeds by default and writes the following ignored runtime artifacts under `runtime/experiments/offline/`:
+The current offline runner is `python -m backend.experiments.runner`. It executes 12 allowlisted scenarios with 30 repetitions and five seeds by default and writes the following ignored runtime artifacts under `runtime/experiments/temporal-final/`:
 
 - `events.jsonl` — raw event-level policy verdicts and ground truth.
 - `predictions.jsonl` — edge-frequency scores, thresholds, predictions, and labels.
@@ -545,9 +545,9 @@ The current offline runner is `python -m backend.experiments.runner`. It execute
 
 The currently implemented live runner is `python -m backend.experiments.live_runner`. It quarantines only `college-api` in the project-owned loopback K3s compatibility lab, brackets every run with positive School and Hospital controls, verifies Cilium policy read-back, observes withdrawal and recovery through the School application, and exports raw cycles plus timing distributions under `runtime/experiments/live/`. It must be migrated to allowlisted retail/vendor workload IDs after the new reference stack is operational.
 
-The learned `GConvGRU` link predictor, chronological training, negative sampling, calibration, per-seed persistence, offline comparison, and continuous API-loop inference are implemented. The API loads a local weights-only checkpoint through `SECURECLOUD_TEMPORAL_MODEL`, rejects incompatible feature schemas, correlates model anomalies with explicit security facts, and persists model version, threshold, score, facts, and source-event IDs. With no configured checkpoint, the API explicitly reports and uses the edge-frequency baseline.
+The learned `GConvGRU` link predictor, chronological training, negative sampling, calibration, per-seed persistence, offline comparison, and continuous API-loop inference are implemented. The v2 feature schema excludes tenant identity, adds relationship features, scores all resolved inference-window edges, and accumulates source risk with EWMA. The API loads the packaged seed-11 weights-only checkpoint by default (or an explicit `SECURECLOUD_TEMPORAL_MODEL`), rejects incompatible schemas, and persists raw GNN score, accumulated risk, baseline score, threshold, corroborating facts, response recommendation, and source-event IDs.
 
-The implemented checkpoint and live pipeline are **not** the final general-purpose detector: their tenant one-hot features are coupled to College/Hospital, and online candidate selection currently emphasizes denied or cross-tenant flows. The next detector revision must remove tenant identity features, score all resolved traffic, add calibrated accumulated risk, retrain on the retail/vendor topology, and repeat the full evaluation. The current five-seed result in `backend/detection/model_card.md` does not outperform the edge-frequency baseline on the small fixed topology and must not be used as evidence of predictive improvement. CPU/memory overhead measurement remains pending.
+The finalized 1,800-run offline comparison measured temporal-engine recall `0.9231` versus baseline recall `0.8462`; the improvement comes from detecting vertical port scans missed by edge frequency. The trade-off is temporal precision `0.9231`, false-positive rate `0.0910`, and average precision `0.7711`, versus baseline `1.0000`, `0.0000`, and `0.8795`. These are offline allowlisted results, not live containment or overhead measurements. CPU/memory overhead, predictive lead time, and longer real Hubble histories remain pending.
 
 ---
 
@@ -558,7 +558,7 @@ The implemented checkpoint and live pipeline are **not** the final general-purpo
 | M1 | Kokonut console shell and API-backed authentication | 10% |
 | M2 | Tenant, catalog, workload lifecycle, and operation status | 40% |
 | M3 | Kubernetes deployment plus default-deny and approved paths | 60% |
-| M4 | Retail/vendor reference stacks, Hubble telemetry, and tenant-agnostic temporal-graph incidents | 80% |
+| M4 | Retail/vendor reference stacks, Hubble telemetry, and tenant-agnostic temporal-graph incidents | 90% |
 | M5 | Durable quarantine, restore, and evaluation dataset | 100% |
 
 The 60% milestone is accepted only when the web portal deploys a real bounded workload and the lab verifies tenant-local allowed traffic, default cross-tenant denial, and the exact authorized vendor-to-maintenance exception with positive and negative controls.
@@ -571,12 +571,12 @@ The 60% milestone is accepted only when the web portal deploys a real bounded wo
 4. **FacilitiesVendor reconciler implemented and live-verified:** the second allowlisted composite operation deploys a SecureCloud-owned web/API/PostgreSQL application with the `facilities-vendor` domain profile. On 18 November 2026, all three deployments reported `1/1` ready, the namespace retained restricted Pod Security and `securecloud.io/purpose=facilities-vendor-stack`, the portal rendered the three observed components and app link, and a work order created through the web proxy was read back from PostgreSQL.
 5. **Live enforcement, telemetry, detection, and recovery verified:** on 20 November 2026, the FacilitiesVendor web-to-API and API-to-PostgreSQL paths succeeded while a FacilitiesVendor-to-RetailCo request received explicit Cilium/Hubble `DROPPED` verdicts. Stable workload identities were resolved with zero rejected records. The active edge-frequency baseline scored the new edge at `0.963` against a `0.600` threshold and persisted the incident and triggering flow. Authorized quarantine created a valid workload-scoped Cilium ingress/egress deny policy; review and restore removed it, replaced the affected web pod, and returned the previously approved path to HTTP 200. The final presentation state retains one fresh `vendor-api` alert and one completed `vendor-web` recovery trace. The learned temporal model is not configured in this run, so the portal and health endpoint explicitly identify `edge-frequency-v1` as the active detector.
 6. **Regression evidence:** 75 backend tests, 22 frontend tests, the production frontend build, and the five-screen real Playwright presentation workflow pass. The two destructive real-cluster lifecycle integration tests remain opt-in.
-7. Add explicit per-service RetailCo policies plus versioned bilateral approval for the single vendor-to-maintenance intent while retaining default deny everywhere else. The current RetailCo compatibility policy is intentionally labelled in the portal.
-8. Replace tenant-name one-hot features with tenant-agnostic node and relational edge features.
-9. Score all resolved flows, implement calibrated EWMA risk, and distinguish ML-only alerts from containment recommendations.
-10. Implement the allowlisted compromised-vendor scenario using real requests and test credentials inside the project lab.
-11. Retrain, recalibrate, and rerun 30 repetitions across five seeds against identical policy and traffic inputs.
-12. Extend the portal incident trace and evaluation view with accumulated risk, prevention, predictive lead time, and containment metrics.
+7. **Explicit RetailCo service policies implemented:** manifest preparation replaces the broad tenant-internal compatibility rule with paired source/destination/port NetworkPolicies for every catalog dependency. The versioned bilateral vendor-to-maintenance policy remains pending.
+8. **Tenant-agnostic temporal schema implemented:** tenant-name one-hot features were removed; same-tenant, approved-intent, denial-ratio, and cross-tenant relationship features were added. Checkpoints accept unseen tenant and workload IDs.
+9. **All-flow scoring and EWMA implemented:** resolved edges in each inference window receive raw GNN, accumulated, and baseline scores. Only a threshold crossing corroborated by explicit facts becomes a containment recommendation.
+10. **Compromised-vendor offline scenario implemented:** the allowlisted dataset includes normal approved vendor maintenance followed by forbidden lateral movement. Replaying it with real project-lab requests remains pending.
+11. **Five-seed evaluation completed:** 30 repetitions across five seeds and 12 identical scenarios produced committed compact summaries plus raw ignored evidence under `runtime/experiments/temporal-final/`.
+12. **Portal risk comparison implemented:** the incident view displays recent GNN, accumulated, threshold, and baseline scores with observe/respond status. Prevention, predictive lead time, and live containment summaries remain pending.
 13. Retire School/Hospital from the primary demo only after equivalent lifecycle, policy, telemetry, containment, and recovery tests pass.
 
 ---

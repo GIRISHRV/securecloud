@@ -25,7 +25,13 @@ from .metrics import (
     safe_ratio,
     wilson_interval,
 )
-from .scenarios import WINDOW_SECONDS, benign_training_flows, build_scenario, scenario_ids
+from .scenarios import (
+    BASE_APPROVED_EDGES,
+    WINDOW_SECONDS,
+    benign_training_flows,
+    build_scenario,
+    scenario_ids,
+)
 
 
 PROJECT_TITLE = "SecureCloud: Zero Trust Security Framework for Multi-Tenant Cloud Virtualisation"
@@ -134,11 +140,17 @@ def run_evaluation(config: EvaluationConfig) -> dict:
                 WorkloadDescriptor("hospital-database", "hospital", "database"),
                 WorkloadDescriptor("college-reporting-web", "college", "web"),
                 WorkloadDescriptor("college-reporting-api", "college", "api"),
+                WorkloadDescriptor("vendor-api", "vendor", "api"),
+                WorkloadDescriptor(
+                    "retail-productcatalogservice", "retail", "api"
+                ),
+                WorkloadDescriptor("retail-cartservice", "retail", "api"),
             ]
             temporal_engine = TemporalGraphEngine(
                 descriptors,
                 hidden_channels=config.temporal_hidden_channels,
                 seed=seed,
+                approved_edges=set(BASE_APPROVED_EDGES),
             )
             temporal_result = temporal_engine.fit(
                 training_snapshots,

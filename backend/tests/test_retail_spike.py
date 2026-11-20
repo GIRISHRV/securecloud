@@ -66,6 +66,22 @@ def test_retail_stack_uses_tenant_and_stable_component_identity():
     assert "serviceAccountName" not in pod["spec"]
 
 
+def test_retail_stack_generates_exact_service_intent_policies():
+    if not SOURCE.exists():
+        pytest.skip("pinned Online Boutique source is not present")
+    documents, summary = prepare_documents(
+        SOURCE,
+        workload_ids={"frontend": "retail-front", "cartservice": "retail-cart"},
+        service_intents=(("frontend", "cartservice", 7070),),
+    )
+    policies = [item for item in documents if item["kind"] == "NetworkPolicy"]
+    assert not any(item["metadata"]["name"] == "allow-tenant-internal" for item in policies)
+    intents = [item for item in policies if item["metadata"]["name"].startswith("intent-")]
+    assert len(intents) == 2
+    assert summary["explicit_service_intents"] == 1
+    assert all("7070" in yaml.safe_dump(item) for item in intents)
+
+
 def test_retail_spike_rejects_unpinned_source():
     source = Path(__file__)
     with pytest.raises(ValueError, match="does not match"):

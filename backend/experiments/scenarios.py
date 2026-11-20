@@ -14,6 +14,14 @@ BASE_APPROVED_EDGES = {
     ("college-api", "college-database"),
     ("hospital-web", "hospital-api"),
     ("hospital-api", "hospital-database"),
+    ("vendor-api", "retail-productcatalogservice"),
+}
+BASE_APPROVED_PORTS = {
+    ("college-web", "college-api"): 8080,
+    ("college-api", "college-database"): 5432,
+    ("hospital-web", "hospital-api"): 8080,
+    ("hospital-api", "hospital-database"): 5432,
+    ("vendor-api", "retail-productcatalogservice"): 3550,
 }
 
 
@@ -28,7 +36,12 @@ class Scenario:
 
 
 def _identity(workload_id: str) -> WorkloadIdentity:
-    tenant = "hospital" if workload_id.startswith("hospital-") else "college"
+    tenant = (
+        "hospital" if workload_id.startswith("hospital-")
+        else "vendor" if workload_id.startswith("vendor-")
+        else "retail" if workload_id.startswith("retail-")
+        else "college"
+    )
     return WorkloadIdentity(tenant, workload_id, workload_id)
 
 
@@ -44,13 +57,13 @@ def _flow(
 ) -> NormalizedFlow:
     source_identity = _identity(source)
     destination_identity = _identity(destination)
-    approved = (source, destination) in approved_edges and (
-        (source.endswith("-web") and destination.endswith("-api") and port == 8080)
-        or (source.endswith("-api") and destination.endswith("-database") and port == 5432)
+    approved = (
+        (source, destination) in approved_edges
+        and BASE_APPROVED_PORTS.get((source, destination), port) == port
     )
     if service_failure:
         verdict, reason = "dropped", "SERVICE_UNAVAILABLE"
-    elif source_identity.tenant_id != destination_identity.tenant_id or not approved:
+    elif not approved:
         verdict, reason = "dropped", "POLICY_DENIED"
     else:
         verdict, reason = "forwarded", None
@@ -75,7 +88,7 @@ def benign_training_flows(seed: int, windows: int = 20) -> list[NormalizedFlow]:
     for window in range(windows):
         start = BASE_TIME + window * WINDOW_SECONDS
         for edge_index, (source, destination) in enumerate(edges):
-            port = 8080 if source.endswith("-web") else 5432
+            port = BASE_APPROVED_PORTS[(source, destination)]
             for sample in range(2 + rng.randrange(3)):
                 flows.append(_flow(
                     f"train-{seed}-{window}-{edge_index}-{sample}",
@@ -124,6 +137,15 @@ def build_scenario(scenario_id: str, seed: int, repetition: int) -> Scenario:
         specs.extend((index * 35, "college-web", "hospital-api", 8080, True, False) for index in range(4))
     elif scenario_id == "suspicious_approved_path":
         specs.extend((index / 5, "college-web", "college-api", 8080, True, False) for index in range(100))
+    elif scenario_id == "compromised_vendor_lateral_movement":
+        specs.extend(
+            (index, "vendor-api", "retail-productcatalogservice", 3550, False, False)
+            for index in range(6)
+        )
+        specs.extend(
+            (10 + index * 4, "vendor-api", "retail-cartservice", 7070, True, False)
+            for index in range(6)
+        )
 
     flows: list[NormalizedFlow] = []
     malicious_ids: set[str] = set()
@@ -158,4 +180,5 @@ def scenario_ids() -> tuple[str, ...]:
         "unexpected_destination",
         "low_rate_lateral_movement",
         "suspicious_approved_path",
+        "compromised_vendor_lateral_movement",
     )
