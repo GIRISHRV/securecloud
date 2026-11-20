@@ -4,6 +4,7 @@ import { ActionButton } from "../../components/ActionButton";
 import { Icon } from "../../components/Icon";
 import { Badge, Empty, time } from "../../components/ui";
 import type { Incident } from "../../domain/models";
+import { formatRiskScore, selectRiskEvidence } from "../../domain/riskEvidence";
 import { TrafficTable } from "../network/TrafficTable";
 
 const incidentTone = (status: Incident["status"]) =>
@@ -86,7 +87,7 @@ function Applications() {
 
 function RiskEvidence() {
   const { data } = usePortal();
-  const observations = data.security?.observations.slice(-10).reverse() ?? [];
+  const observations = selectRiskEvidence(data.security?.observations ?? []);
   if (!observations.length) {
     return (
       <div className="demo-stage-empty">
@@ -117,11 +118,11 @@ function RiskEvidence() {
                 <strong>{item.sourceName}</strong>
                 <span> → {item.destinationName}</span>
               </td>
-              <td>{item.anomalyScore.toFixed(3)}</td>
+              <td>{formatRiskScore(item.anomalyScore)}</td>
               <td>
-                {item.accumulatedRisk.toFixed(3)} / {item.threshold.toFixed(3)}
+                {formatRiskScore(item.accumulatedRisk)} / {formatRiskScore(item.threshold)}
               </td>
-              <td>{item.baselineScore.toFixed(3)}</td>
+              <td>{formatRiskScore(item.baselineScore)}</td>
               <td>
                 <Badge
                   tone={
