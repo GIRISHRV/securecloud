@@ -6,6 +6,12 @@ from .api import Settings, create_app
 
 DB_PATH = Path(os.environ.get("SECURECLOUD_DB", "backend_data.sqlite"))
 ORIGIN = os.environ.get("SECURECLOUD_ORIGIN", "http://127.0.0.1:5173")
+DEFAULT_TEMPORAL_MODEL = (
+    Path(__file__).parent
+    / "detection"
+    / "artifacts"
+    / "temporal_graph_seed_11.pt"
+)
 
 settings = Settings(
     database=DB_PATH,
@@ -22,7 +28,13 @@ settings = Settings(
         else None
     ),
     hubble_export=Path(os.environ["SECURECLOUD_HUBBLE_EXPORT"]) if os.environ.get("SECURECLOUD_HUBBLE_EXPORT") else None,
-    temporal_model=Path(os.environ["SECURECLOUD_TEMPORAL_MODEL"]) if os.environ.get("SECURECLOUD_TEMPORAL_MODEL") else None,
+    temporal_model=(
+        Path(os.environ["SECURECLOUD_TEMPORAL_MODEL"])
+        if os.environ.get("SECURECLOUD_TEMPORAL_MODEL")
+        else DEFAULT_TEMPORAL_MODEL
+        if DEFAULT_TEMPORAL_MODEL.is_file()
+        else None
+    ),
 )
 
 app = create_app(settings)

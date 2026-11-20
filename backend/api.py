@@ -151,7 +151,7 @@ def create_app(settings: Settings) -> FastAPI:
     if isinstance(graph_detector, TemporalGraphDetectionPipeline):
         graph_detector.validate([
             WorkloadDescriptor(**item) for item in store.detection_workloads()
-        ])
+        ], store.approved_edges())
     stop_reconciler = threading.Event()
     telemetry_status = {
         "enabled": settings.hubble_export is not None,
@@ -206,6 +206,8 @@ def create_app(settings: Settings) -> FastAPI:
                             for item in store.detection_workloads()
                         ])
                     findings = graph_detector.analyze(*arguments)
+                    if isinstance(graph_detector, TemporalGraphDetectionPipeline):
+                        store.record_risk_observations(graph_detector.last_observations)
                     evidence_by_id = {
                         event["id"]: event
                         for event in store.get_normalized_traffic(limit=1_000)
@@ -919,6 +921,7 @@ def create_app(settings: Settings) -> FastAPI:
             distinct_traffic[key] = event
         all_traffic = list(distinct_traffic.values())[-100:]
         all_incidents = store.get_incidents()
+        all_risk = store.risk_observations()
         with store.connect() as db:
             visible = visible_tenant_ids(db, user)
             tenants = [
@@ -970,6 +973,11 @@ def create_app(settings: Settings) -> FastAPI:
                 for incident in all_incidents
                 if incident["tenantId"] in visible
             ]
+            risk = [
+                observation
+                for observation in all_risk
+                if observation["tenantId"] in visible
+            ]
             return {
                 "version": 2,
                 "tenants": tenants,
@@ -977,6 +985,12 @@ def create_app(settings: Settings) -> FastAPI:
                 "workloads": workloads,
                 "traffic": traffic,
                 "incidents": incidents,
+                "security": {
+                    "detector": telemetry_status["detector"],
+                    "telemetryEnabled": telemetry_status["enabled"],
+                    "lastPoll": telemetry_status["last_poll"],
+                    "observations": risk,
+                },
             }
 
     return app

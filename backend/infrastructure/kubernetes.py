@@ -144,6 +144,7 @@ class KubernetesInfrastructure:
 
         namespace = tenant_namespace(stack.tenant_id)
         self._ensure_namespace(namespace, stack.tenant_id)
+        service_ports = {service.id: service.port for service in definition.services}
         documents, _ = prepare_documents(
             self.retail_manifest,
             namespace,
@@ -153,6 +154,12 @@ class KubernetesInfrastructure:
             workload_templates={
                 service.id: service.template for service in definition.services
             },
+            service_intents=tuple(
+                (service.id, dependency, service_ports[dependency])
+                for service in definition.services
+                for dependency in service.dependencies
+                if service_ports.get(dependency) is not None
+            ),
         )
         deployments = {}
         for document in documents:

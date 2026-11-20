@@ -104,6 +104,28 @@ export const incidentSchema = z.object({
   evidence: z.array(trafficSchema).min(1).max(1000),
   trace: z.array(traceSchema).max(200),
 });
+export const riskObservationSchema = z.object({
+  modelVersion: z.string().min(1).max(80),
+  windowStart: timestamp,
+  windowEnd: timestamp,
+  sourceId: text,
+  destinationId: text,
+  sourceName: text,
+  destinationName: text,
+  anomalyScore: z.number().min(0).max(1),
+  accumulatedRisk: z.number().min(0).max(1),
+  baselineScore: z.number().min(0).max(1),
+  threshold: z.number().min(0).max(1),
+  corroborated: z.boolean(),
+  response: z.enum(["observe", "containment-recommended"]),
+  tenantId: tenantIdSchema.nullable(),
+});
+export const securityStateSchema = z.object({
+  detector: z.string().min(1).max(80),
+  telemetryEnabled: z.boolean(),
+  lastPoll: timestamp.nullable(),
+  observations: z.array(riskObservationSchema).max(1000),
+});
 export const stateSchema = z.object({
   version: z.literal(2),
   tenants: z.array(tenantSchema),
@@ -111,6 +133,7 @@ export const stateSchema = z.object({
   workloads: z.array(workloadSchema),
   traffic: z.array(trafficSchema).max(1000),
   incidents: z.array(incidentSchema),
+  security: securityStateSchema.optional(),
 });
 
 export type TenantId = z.infer<typeof tenantIdSchema>;
@@ -125,6 +148,7 @@ export type ConnectionIntent = z.infer<typeof intentSchema>;
 export type TrafficEvent = z.infer<typeof trafficSchema>;
 export type TraceStep = z.infer<typeof traceSchema>;
 export type Incident = z.infer<typeof incidentSchema>;
+export type RiskObservation = z.infer<typeof riskObservationSchema>;
 export type DemoState = z.infer<typeof stateSchema>;
 export type Snapshot = { data: DemoState; storageWarning: string | null };
 

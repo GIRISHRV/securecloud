@@ -60,6 +60,14 @@ export function usePortal() {
         incidents: snapshot.data.incidents.filter(
           (i) => i.tenantId === tenantId,
         ),
+        security: snapshot.data.security
+          ? {
+              ...snapshot.data.security,
+              observations: snapshot.data.security.observations.filter(
+                (observation) => observation.tenantId === tenantId,
+              ),
+            }
+          : undefined,
       };
   return {
     ...snapshot,
