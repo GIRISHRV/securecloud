@@ -114,6 +114,7 @@ test("renders the reconciled retail stack from the management API", async ({
     .getByRole("link", { name: "Tenants & Workloads", exact: true })
     .click();
 
+  await page.locator(".table-toolbar select").selectOption({ label: "RetailCo" });
   const workloadRows = page.locator(".workload-table tbody tr");
   await expect(workloadRows).toHaveCount(12);
   await expect(page.getByRole("button", { name: "frontend", exact: true })).toBeVisible();
@@ -132,4 +133,45 @@ test("renders the reconciled retail stack from the management API", async ({
     .getByRole("row", { name: /Retail application/ });
   await expect(retailRow).toContainText("12");
   await expect(retailRow.getByRole("button", { name: "Deploy stack" })).toBeEnabled();
+});
+
+test("renders the functional facilities vendor stack", async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.goto("/");
+  await page.getByLabel("Username").fill(username!);
+  await page.getByLabel("Password").fill(password!);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("link", { name: "Tenants & Workloads", exact: true })
+    .click();
+
+  await page
+    .locator(".table-toolbar select")
+    .selectOption({ label: "FacilitiesVendor" });
+  const rows = page.locator(".workload-table tbody tr");
+  await expect(rows).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "vendor-web", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "vendor-api", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "vendor-database", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".workload-table tbody").getByText("running", { exact: true }),
+  ).toHaveCount(3);
+  await expect(page.getByRole("link", { name: "Open app" })).toHaveAttribute(
+    "href",
+    "http://127.0.0.1:8095/",
+  );
+
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("link", { name: "Catalog", exact: true })
+    .click();
+  const vendorRow = page
+    .getByRole("table", { name: "Approved application stacks" })
+    .getByRole("row", { name: /Facilities vendor application/ });
+  await expect(vendorRow).toContainText("validated");
+  await expect(vendorRow).toContainText("3");
+  await expect(vendorRow.getByRole("button", { name: "Deploy stack" })).toBeEnabled();
 });

@@ -73,12 +73,15 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
                 : "No incidents yet"
             }
           >
-            Use the Network Map to send three cross-tenant attempts within 60
-            seconds. The resulting alert will appear here.
+            {service.mode === "api"
+              ? "Detector findings from observed Hubble traffic will appear here."
+              : "Use the Network Map to send three cross-tenant attempts within 60 seconds. The resulting alert will appear here."}
           </Empty>
           <div className="empty-action">
             <ActionButton className="button primary" onClick={onNetwork}>
-              Open connection simulator
+              {service.mode === "api"
+                ? "Open network evidence"
+                : "Open connection simulator"}
               <Icon name="arrow" size={16} />
             </ActionButton>
           </div>
@@ -142,10 +145,16 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
                 </div>
                 <p className="info-note">
                   {selected.status === "alert"
-                    ? "The rule detected suspicious attempts. Quarantine withdraws previously approved access and may disrupt dependent services."
+                    ? service.mode === "api"
+                      ? "The detector correlated an anomalous graph edge with explicit policy-denial evidence. Quarantine withdraws this workload's previously approved access."
+                      : "The rule detected suspicious attempts. Quarantine withdraws previously approved access and may disrupt dependent services."
                     : selected.status === "restored"
-                      ? "The original static intents apply again. Verify the approved path in the simulator. Stopped workloads remain stopped."
-                      : "Quarantine remains active through review and page refresh. Test the previously approved path to observe its simulated denial."}
+                      ? service.mode === "api"
+                        ? "The original static intents apply again. Verify the approved path against live network evidence."
+                        : "The original static intents apply again. Verify the approved path in the simulator. Stopped workloads remain stopped."
+                      : service.mode === "api"
+                        ? "Quarantine remains active through reconciliation and pod replacement until an authorized restore."
+                        : "Quarantine remains active through review and page refresh. Test the previously approved path to observe its simulated denial."}
                 </p>
                 {error && (
                   <p className="error" role="alert">
@@ -190,7 +199,9 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
                     </ActionButton>
                   )}
                   <ActionButton className="button" onClick={onNetwork}>
-                    Test a connection
+                    {service.mode === "api"
+                      ? "View network evidence"
+                      : "Test a connection"}
                     <Icon name="arrow" size={16} />
                   </ActionButton>
                 </div>
@@ -198,7 +209,11 @@ export function Incidents({ onNetwork }: { onNetwork: () => void }) {
             </Panel>
             <Panel
               title="Incident trace"
-              description="From the first attempt to the current response. Simulation only."
+              description={
+                service.mode === "api"
+                  ? "From the first observed flow to the current response."
+                  : "From the first attempt to the current response. Simulation only."
+              }
             >
               <ol className="trace">
                 {selected.trace.map((step, index) => (

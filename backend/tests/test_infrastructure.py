@@ -2,8 +2,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from backend.infrastructure.base import WorkloadRequest
-from backend.infrastructure.base import StackRequest
+from backend.infrastructure.base import StackRequest, WorkloadObservation, WorkloadRequest
 from backend.infrastructure.kubernetes import KubernetesInfrastructure, TEMPLATES, tenant_namespace, workload_label
 from backend.infrastructure.memory import MemoryInfrastructure
 from backend.catalog import stack_definition
@@ -141,6 +140,51 @@ def test_quarantine_policy_is_workload_scoped_and_denies_both_directions():
     assert policy["spec"]["egressDeny"] == [{"toEntities": ["all"]}]
 
 
+def test_restore_restarts_the_same_observed_deployment():
+    infrastructure = object.__new__(KubernetesInfrastructure)
+    deployment = SimpleNamespace(
+        metadata=SimpleNamespace(uid="deployment-uid", resource_version="27")
+    )
+    patches = []
+    infrastructure.apps = SimpleNamespace(
+        read_namespaced_deployment=lambda name, namespace: deployment,
+        patch_namespaced_deployment=lambda name, namespace, body: patches.append(
+            (name, namespace, body)
+        ),
+    )
+    request = WorkloadRequest(
+        "workload-1",
+        "tenant-1",
+        "tenant-web",
+        "web",
+        "deployment-uid",
+        "20",
+    )
+
+    infrastructure._restart_deployment_after_restore(
+        request, "sc-test", "quarantine-policy-uid"
+    )
+
+    assert patches == [
+        (
+            "tenant-web",
+            "sc-test",
+            {
+                "metadata": {"resourceVersion": "27"},
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {
+                                "securecloud.io/restored-from-policy": "quarantine-policy-uid"
+                            }
+                        }
+                    }
+                },
+            },
+        )
+    ]
+
+
 def test_containment_request_is_persisted_and_reconciled(tmp_path):
     infrastructure = MemoryInfrastructure()
     store = Store(tmp_path / "containment.sqlite", infrastructure=infrastructure)
@@ -253,6 +297,66 @@ def test_reference_database_is_non_root_read_only_and_persistent():
     assert security_context["runAsUser"] == 70
     assert volumes[0]["persistentVolumeClaim"]["claimName"] == "college-database-data"
     assert container["startupProbe"]["exec"]["command"][0] == "pg_isready"
+
+
+def test_facilities_vendor_components_use_the_vendor_profile_and_service_names():
+    infrastructure = object.__new__(KubernetesInfrastructure)
+    api = WorkloadRequest("vendor-api-id", "vendor-tenant", "vendor-api", "api")
+    container, _, _ = infrastructure._container_spec(
+        api,
+        TEMPLATES["api"],
+        "facilities-vendor",
+        database_upstream="vendor-database",
+    )
+    environment = {item["name"]: item.get("value") for item in container["env"]}
+    assert container["image"] == "docker.io/securecloud/reference-api:0.3.0"
+    assert environment["APP_PROFILE"] == "facilities-vendor"
+    assert environment["PGHOST"] == "vendor-database"
+
+    web = WorkloadRequest("vendor-web-id", "vendor-tenant", "vendor-web", "web")
+    container, _, _ = infrastructure._container_spec(
+        web,
+        TEMPLATES["web"],
+        "facilities-vendor",
+        api_upstream="vendor-api",
+    )
+    assert container["env"] == [{"name": "API_UPSTREAM", "value": "vendor-api"}]
+
+
+def test_facilities_vendor_stack_reconciles_all_three_bounded_components():
+    definition = stack_definition("facilities-vendor-stack")
+    assert definition is not None
+    infrastructure = object.__new__(KubernetesInfrastructure)
+    calls = []
+
+    def apply_profile(workload, **options):
+        calls.append((workload, options))
+        return WorkloadObservation("running", f"uid-{workload.name}", "1")
+
+    infrastructure._apply_profile_workload = apply_profile
+    components = {
+        service.id: WorkloadRequest(
+            f"workload-{service.id}",
+            "vendor-tenant",
+            service.id,
+            service.template,
+        )
+        for service in definition.services
+    }
+    result = infrastructure._deploy_facilities_vendor_stack(
+        StackRequest(
+            "vendor-stack-id",
+            "vendor-tenant",
+            "facilities-app",
+            "facilities-vendor-stack",
+        ),
+        components,
+    )
+
+    assert result.state == "running"
+    assert set(result.components) == {"vendor-web", "vendor-api", "vendor-database"}
+    assert all(options["reference_profile"] == "facilities-vendor" for _, options in calls)
+    assert all(options["namespace_purpose"] == "facilities-vendor-stack" for _, options in calls)
 
 
 def test_reference_lab_queues_six_real_reconciliation_operations(tmp_path):

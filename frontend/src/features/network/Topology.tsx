@@ -25,12 +25,17 @@ export function Topology({ compact = false }: { compact?: boolean }) {
     <>
       <div className={`topology ${compact ? "compact-topology" : ""}`}>
         {visibleTenants.map((tenant) => {
-          const workloads = templates.flatMap((template) =>
-            activeWorkloads.filter(
+          const workloadGroups = templates.map((template) => ({
+            template,
+            workloads: activeWorkloads.filter(
               (workload) =>
                 workload.tenantId === tenant.id &&
                 workload.templateId === template.id,
             ),
+          }));
+          const workloadCount = workloadGroups.reduce(
+            (total, group) => total + group.workloads.length,
+            0,
           );
           return (
             <section className="tenant-zone" key={tenant.id}>
@@ -40,45 +45,42 @@ export function Topology({ compact = false }: { compact?: boolean }) {
                 </span>
                 <strong>{tenant.name}</strong>
                 <span className="zone-caption">
-                  {workloads.length} workload{workloads.length === 1 ? "" : "s"}
+                  {workloadCount} workload{workloadCount === 1 ? "" : "s"}
                 </span>
               </div>
               <div className="topology-flow">
-                {workloads.map((workload, index) => {
-                  const previous = workloads[index - 1];
-                  const port =
-                    previous?.templateId === "web" && workload.templateId === "api"
-                      ? "8080"
-                      : previous?.templateId === "api" && workload.templateId === "database"
-                        ? "5432"
-                        : null;
-                  return (
-                    <div className="topology-step" key={workload.id}>
-                      {port && (
-                        <div className="topology-link" aria-label={`TCP ${port}`}>
-                          <span>{port}</span>
-                        </div>
+                {workloadGroups.map(({ template, workloads }) => (
+                  <section className="topology-tier" key={template.id}>
+                    <header className="topology-tier-heading">
+                      <span>{template.name}</span>
+                      <span>{workloads.length}</span>
+                    </header>
+                    <div className="topology-tier-nodes">
+                      {workloads.map((workload) => (
+                        <button
+                          key={workload.id}
+                          title={`Inspect ${workload.name}`}
+                          className={`topology-node ${workload.quarantined ? "quarantine-node" : ""} ${workload.status === "stopped" ? "stopped-node" : ""}`}
+                          onClick={() => setSelected(workload.id)}
+                        >
+                          <span className={`small-template ${workload.templateId}`}>
+                            <Icon name={workload.templateId} size={18} />
+                          </span>
+                          <span className="node-name">{workload.name}</span>
+                          <span
+                            className={`node-dot ${workload.quarantined ? "red-dot" : workload.status === "stopped" ? "gray-dot" : ""}`}
+                          />
+                          <span className="node-state">
+                            {workload.quarantined ? "quarantined" : workload.status}
+                          </span>
+                        </button>
+                      ))}
+                      {!workloads.length && (
+                        <span className="zone-empty">No workloads</span>
                       )}
-                      <button
-                        title={`Inspect ${workload.name}`}
-                        className={`topology-node ${workload.quarantined ? "quarantine-node" : ""} ${workload.status === "stopped" ? "stopped-node" : ""}`}
-                        onClick={() => setSelected(workload.id)}
-                      >
-                        <span className={`small-template ${workload.templateId}`}>
-                          <Icon name={workload.templateId} size={18} />
-                        </span>
-                        <span className="node-name">{workload.name}</span>
-                        <span
-                          className={`node-dot ${workload.quarantined ? "red-dot" : workload.status === "stopped" ? "gray-dot" : ""}`}
-                        />
-                        <span className="node-state">
-                          {workload.quarantined ? "quarantined" : workload.status}
-                        </span>
-                      </button>
                     </div>
-                  );
-                })}
-                {!workloads.length && <span className="zone-empty">No workloads</span>}
+                  </section>
+                ))}
               </div>
             </section>
           );
@@ -86,8 +88,8 @@ export function Topology({ compact = false }: { compact?: boolean }) {
       </div>
       <div className="topology-legend">
         <span>
-          <i className="legend-line" />
-          Approved path
+          <i className="legend-group" />
+          Grouped by catalog role
         </span>
         <span>
           <i className="node-dot" />

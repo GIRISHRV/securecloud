@@ -188,8 +188,16 @@ def create_app(settings: Settings) -> FastAPI:
                 inserted = store.ingest_normalized_flows(list(batch.flows))
                 new_findings = 0
                 if inserted:
+                    recent_flows = store.get_normalized_flows(limit=100_000)
+                    if recent_flows:
+                        analysis_cutoff = recent_flows[-1].observed_at - 300
+                        recent_flows = [
+                            flow
+                            for flow in recent_flows
+                            if flow.observed_at >= analysis_cutoff
+                        ]
                     arguments = [
-                        store.get_normalized_flows(limit=100_000),
+                        recent_flows,
                         store.approved_edges(),
                     ]
                     if isinstance(graph_detector, TemporalGraphDetectionPipeline):
@@ -443,12 +451,12 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/api/catalog")
     def catalog(request: Request):
         session(request)
-        deployable = (
-            frozenset({"retail-stack"})
-            if infrastructure is not None and settings.retail_manifest is not None
-            else frozenset()
-        )
-        return catalog_response(deployable)
+        deployable: set[str] = set()
+        if infrastructure is not None:
+            deployable.add("facilities-vendor-stack")
+            if settings.retail_manifest is not None:
+                deployable.add("retail-stack")
+        return catalog_response(frozenset(deployable))
 
     @app.get("/api/tenants")
     def tenants(request: Request):
@@ -543,12 +551,10 @@ def create_app(settings: Settings) -> FastAPI:
         ).hexdigest()
         with store.connect() as db:
             authorize(db, user, tenant, write=True)
-            if body.stack != "retail-stack":
-                raise HTTPException(409, "Stack deployment is not implemented")
-            if infrastructure is None or settings.retail_manifest is None:
-                raise HTTPException(
-                    503, "Retail stack infrastructure is not configured"
-                )
+            if infrastructure is None:
+                raise HTTPException(503, "Stack infrastructure is not configured")
+            if body.stack == "retail-stack" and settings.retail_manifest is None:
+                raise HTTPException(503, "Retail stack manifest is not configured")
             key, old = stack_idem(request, user, db, fingerprint)
             if old:
                 return old
@@ -559,7 +565,7 @@ def create_app(settings: Settings) -> FastAPI:
             ).fetchone()[0]
             if existing_count + len(definition.services) > 12:
                 raise HTTPException(
-                    409, "Retail stack requires an empty tenant workload quota"
+                    409, "Stack exceeds the tenant workload quota"
                 )
             deployment_id = str(uuid.uuid4())
             operation_id = str(uuid.uuid4())
@@ -908,7 +914,7 @@ def create_app(settings: Settings) -> FastAPI:
         for event in merged_traffic:
             key = (
                 event["sourceId"], event["destinationId"], event["port"],
-                event["decision"], event["reason"], int(event["at"] // 5),
+                event["decision"], event["reason"],
             )
             distinct_traffic[key] = event
         all_traffic = list(distinct_traffic.values())[-100:]
@@ -940,6 +946,14 @@ def create_app(settings: Settings) -> FastAPI:
                         if r["id"] == "college-web" and r["observed"] == "running"
                         else "http://127.0.0.1:8092/"
                         if r["id"] == "hospital-web" and r["observed"] == "running"
+                        else "http://127.0.0.1:8094/"
+                        if r["stack_deployment_id"] is not None
+                        and r["name"] == "frontend"
+                        and r["observed"] == "running"
+                        else "http://127.0.0.1:8095/"
+                        if r["stack_deployment_id"] is not None
+                        and r["name"] == "vendor-web"
+                        and r["observed"] == "running"
                         else None
                     ),
                 }

@@ -66,7 +66,7 @@ def test_authenticated_catalog_exposes_only_bounded_definitions(lab):
     assert retail["status"] == "validated"
     assert retail["deployment_enabled"] is False
     assert len(retail["services"]) == 12
-    assert vendor["status"] == "planned"
+    assert vendor["status"] == "validated"
     assert vendor["deployment_enabled"] is False
     assert len(vendor["services"]) == 3
     serialized = catalog.text.casefold()
@@ -107,7 +107,7 @@ def test_stack_deploy_boundary_is_authorized_allowlisted_and_fail_closed(lab):
         f"/api/tenants/{college}/stacks",
         json={"name": "vendor-app", "stack": "facilities-vendor-stack"},
         headers={"Idempotency-Key": "vendor-stack-request-1"},
-    ).status_code == 409
+    ).status_code == 503
     with app.state.store.connect() as db:
         assert db.execute("SELECT count(*) FROM stack_deployments").fetchone()[0] == 0
 

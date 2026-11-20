@@ -86,6 +86,59 @@ PROFILES: dict[str, ProfileSpec] = {
             )),
         ),
     ),
+    "facilities-vendor": ProfileSpec(
+        id="facilities-vendor",
+        name="Facilities Management",
+        description="Manage maintenance work orders, technicians, and service reports.",
+        resources=(
+            ResourceSpec(
+                "work_orders",
+                "work order",
+                "Work orders",
+                "Scheduled maintenance requests for managed sites.",
+                (
+                    field("reference", "Reference", max_length=30),
+                    field("site", "Site", max_length=80),
+                    field("scheduled_at", "Scheduled date and time", kind="datetime-local", max_length=25),
+                    field(
+                        "status",
+                        "Status",
+                        kind="select",
+                        options=("Submitted", "Approved", "In progress", "Completed"),
+                    ),
+                ),
+            ),
+            ResourceSpec(
+                "technicians",
+                "technician",
+                "Technicians",
+                "Project-assigned maintenance staff and specialties.",
+                (
+                    field("full_name", "Full name"),
+                    field("employee_id", "Employee ID", max_length=30),
+                    field("specialty", "Specialty", max_length=80),
+                    field("phone", "Phone", kind="tel", max_length=20),
+                ),
+            ),
+            ResourceSpec(
+                "service_reports",
+                "service report",
+                "Service reports",
+                "Completed maintenance evidence linked to a work order.",
+                (
+                    field("work_order_reference", "Work order reference", max_length=30),
+                    field("summary", "Summary", max_length=200),
+                    field("completed_on", "Completed on", kind="date", max_length=10),
+                    field(
+                        "outcome",
+                        "Outcome",
+                        kind="select",
+                        options=("Resolved", "Follow-up required"),
+                    ),
+                ),
+            ),
+        ),
+    ),
 }
 
 
