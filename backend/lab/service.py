@@ -19,7 +19,7 @@ from typing import Callable
 from backend.infrastructure.base import InfrastructureError
 from backend.infrastructure.kubernetes import tenant_namespace
 
-from .scenarios import BY_ID, CHECKOUT_SCRIPT, PROBE_SCRIPT, SCENARIOS, Probe, Scenario
+from .scenarios import BY_ID, PROBE_SCRIPT, SCENARIOS, Probe, Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS lab_runs(
   source_workload TEXT, steps_json TEXT NOT NULL DEFAULT '[]', result_json TEXT, error TEXT);
 CREATE INDEX IF NOT EXISTS lab_runs_created_idx ON lab_runs(created_at DESC);
 """
-OBSERVE_SECONDS = 15.0
+OBSERVE_SECONDS = 8.0
 
 
 class LabUnavailable(RuntimeError):
@@ -45,6 +45,9 @@ class LabService:
         self.telemetry = telemetry_status
         self.observe_seconds = observe_seconds
         self.clock = clock
+        self.order_hook = None  # set by the retail router: places one real Northstar order
+        self.session_start = clock()  # the provider console shows only this demo session
+        self.protection = True  # SecureCloud enforcement and detection on/off for before/after demos
         self._lock = threading.Lock()
         self._logs: dict[str, list[dict]] = {}
         with store.connect() as db:
@@ -74,7 +77,10 @@ class LabService:
         telemetry = {
             "enabled": bool(self.telemetry.get("enabled")),
             "last_poll": last_poll,
-            "fresh": bool(last_poll and self.clock() - last_poll < 10 and not self.telemetry.get("last_error")),
+            # Fresh means flows are actually arriving, not just that the collector is polling:
+            # a stopped Hubble capture leaves the collector polling an idle file.
+            "fresh": bool(last_poll and self.clock() - last_poll < 10 and not self.telemetry.get("last_error")
+                          and self._newest_flow_age() < 15),
             "accepted": self.telemetry.get("accepted", 0),
             "detector": self.telemetry.get("detector"),
             "last_error": self.telemetry.get("last_error"),
@@ -91,7 +97,34 @@ class LabService:
                 )
         ready = cluster["connected"] and telemetry["enabled"]
         return {"ready": ready, "cluster": cluster, "telemetry": telemetry, "workloads": workloads,
-                "running": self._active_run_id()}
+                "running": self._active_run_id(), "protection": self.protection, "session_start": self.session_start}
+
+    def _newest_flow_age(self) -> float:
+        with self.store.connect() as db:
+            newest = db.execute("SELECT max(observed_at) FROM normalized_flows").fetchone()[0]
+        return self.clock() - newest if newest else float("inf")
+
+    def reset(self) -> dict:
+        """Start a fresh demo session: earlier runs and incidents stay recorded but are hidden."""
+        self.session_start = self.clock()
+        return self.status()
+
+    def set_protection(self, enabled: bool) -> dict:
+        """Turn SecureCloud on or off for the lab tenants.
+
+        Off removes every tenant network policy (so the cluster is flat, as without SecureCloud)
+        and pauses graph detection; on re-applies default-deny and the approved intents.
+        """
+        if self.infrastructure is None or not hasattr(self.infrastructure, "set_protection"):
+            raise LabUnavailable("The Kubernetes adapter is not configured.")
+        if self._active_run_id():
+            raise LabUnavailable("Wait for the running scenario to finish.")
+        with self.store.connect() as db:
+            tenants = [row[0] for row in db.execute(
+                "SELECT DISTINCT tenant_id FROM stack_deployments WHERE desired!='deleted' AND stack_id IN ('northstar-shop-stack','bloom-shop-stack','platform-stack')")]
+        self.infrastructure.set_protection(enabled, [tenant_namespace(tenant) for tenant in tenants])
+        self.protection = enabled
+        return self.status()
 
     def scenarios(self) -> list[dict]:
         return [
@@ -99,7 +132,7 @@ class LabService:
                 "id": s.id, "title": s.title, "kind": s.kind, "summary": s.summary,
                 "what_to_watch": s.what_to_watch, "tags": list(s.tags),
                 "source": s.source_service,
-                "targets": sorted({p.target_service for p in s.probes}) or (["frontend"] if s.checkout else []),
+                "targets": sorted({p.target_service for p in s.probes}) or (["northstar-api"] if s.checkout else []),
             }
             for s in SCENARIOS
         ]
@@ -134,7 +167,8 @@ class LabService:
 
     def runs(self, limit: int = 20) -> list[dict]:
         with self.store.connect() as db:
-            rows = db.execute("SELECT * FROM lab_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute("SELECT * FROM lab_runs WHERE created_at>=? ORDER BY created_at DESC LIMIT ?",
+                              (self.session_start, limit)).fetchall()
         return [self._summary(row) for row in rows]
 
     def run(self, run_id: str) -> dict | None:
@@ -185,6 +219,8 @@ class LabService:
         self._log(run_id, "info", f"scenario {scenario.id}: {scenario.title}")
         try:
             namespace = tenant_namespace(source["tenant_id"])
+            if scenario.restart_source:
+                self._restart(run_id, namespace, source)
             if scenario.checkout:
                 steps, result = self._run_checkout(run_id, namespace, source)
             else:
@@ -201,6 +237,8 @@ class LabService:
             self._lock.release()
 
     def _target(self, probe: Probe):
+        if probe.external_host:  # outside the cluster: no workload, Hubble sees the "world" identity
+            return {"id": None, "tenant_id": None}, probe.external_host
         target = self._workload(probe.target_stack, probe.target_service)
         if target is None:
             raise LabUnavailable(f"{probe.target_service} is not deployed in the lab.")
@@ -212,6 +250,12 @@ class LabService:
         )
         return target, host
 
+    def _restart(self, run_id, namespace: str, source):
+        self._log(run_id, "cmd", f"kubectl rollout restart -n {namespace} deploy/{source['name']}")
+        old, new, seconds = self.infrastructure.restart_workload(namespace, source["id"], source["name"])
+        self._log(run_id, "out", f"old pod {old} replaced by {new} in {seconds:.1f}s")
+        self._log(run_id, "info", "same workload label → same policies (including any quarantine) apply to the new pod")
+
     def _run_probes(self, run_id, scenario: Scenario, namespace: str, source):
         quarantined = bool(source["quarantined"])
         steps, spec = [], []
@@ -222,7 +266,7 @@ class LabService:
                 expect = "blocked" if quarantined else "allowed"
             steps.append({
                 "index": index, "label": probe.label or probe.target_service, "target": probe.target_service,
-                "target_id": target["id"], "cross_tenant": target["tenant_id"] != source["tenant_id"],
+                "target_id": target["id"], "cross_tenant": bool(target["tenant_id"]) and target["tenant_id"] != source["tenant_id"],
                 "port": probe.port, "attempts": probe.count, "expect": expect, "state": "sending",
                 "client": None, "verdict": None,
             })
@@ -252,35 +296,36 @@ class LabService:
         return steps, _score(steps)
 
     def _run_checkout(self, run_id, namespace: str, source):
-        frontend = self._workload("retail-stack", "frontend")
-        if frontend is None:
-            raise LabUnavailable("The retail storefront is not deployed in the lab.")
-        steps = [{"index": 0, "label": "Shopper checkout", "target": "frontend", "target_id": frontend["id"],
+        """A real Northstar order: saved by the shop, then sent web -> order API -> database in the cluster."""
+        if self.order_hook is None:
+            raise LabUnavailable("The Northstar storefront is not connected to the lab.")
+        api = self._workload("northstar-shop-stack", "northstar-api")
+        if api is None:
+            raise LabUnavailable("The Northstar order API is not deployed in the lab.")
+        steps = [{"index": 0, "label": "Shopper order", "target": "northstar-api", "target_id": api["id"],
                   "cross_tenant": False, "port": 8080, "attempts": 1, "expect": "allowed", "state": "sending",
                   "client": None, "verdict": None}]
         self._save(run_id, steps=steps)
-        storefront = f"http://frontend.{namespace}.svc.cluster.local"
-        self._log(run_id, "cmd", f"kubectl exec -n {namespace} deploy/{source['name']} -- python -c \"$CHECKOUT\" {storefront}")
+        self._log(run_id, "cmd", "POST /api/retail/checkout  (customer@test.com, 1 item)")
         sent_at = self.clock()
-        raw = self.infrastructure.exec_in_workload(
-            namespace, source["id"], ["python", "-c", CHECKOUT_SCRIPT, storefront], timeout=120,
-        )
-        outcome = _last_json(raw)
-        if not isinstance(outcome, dict):
-            raise ValueError("The storefront checkout did not return a result")
-        paths = {"Open storefront": "GET /", "View product": "GET /product/OLJCESPC7Z", "Add to cart": "POST /cart", "Checkout": "POST /cart/checkout"}
-        for item in outcome.get("steps", []):
-            self._log(run_id, "out", f"{paths.get(item['step'], item['step'])}  →  {item.get('status') or item.get('error')}  {item['ms']} ms")
-        if outcome.get("order_id"):
-            self._log(run_id, "out", f"order confirmed  #{outcome['order_id']}")
-        steps[0]["client"] = {"checkout": outcome.get("steps", []), "order_id": outcome.get("order_id"),
-                              "complete": bool(outcome.get("complete"))}
+        order, mirror = self.order_hook()
+        self._log(run_id, "out", f"order saved  #{order['order_number']}  ₹{order['total_minor'] / 100:,.2f}")
+        self._log(run_id, "send", f"POST {source['name']}/api/resources/orders  →  " + (
+            f"{mirror['status']} in {mirror['ms']} ms" if mirror.get("ok") else f"failed: {mirror.get('error') or mirror.get('status')}"))
+        platform = (mirror.get("record") or {}).get("platform") or {}
+        if platform.get("order_id"):
+            self._log(run_id, "out", f"platform  order id {platform['order_id']} · payment {platform.get('payment', '?')} · email {platform.get('email', '?')}")
+        elif platform.get("error"):
+            self._log(run_id, "error", f"platform settlement failed: {platform['error']}")
+        steps[0]["client"] = {"order_id": order["order_number"], "complete": bool(mirror.get("ok")), "checkout": [],
+                              "platform": platform}
         steps[0]["state"] = "observing"
         self._save(run_id, steps=steps)
-        self._observe(run_id, steps, source["id"], sent_at, downstream_tenant=frontend["tenant_id"])
+        self._observe(run_id, steps, source["id"], sent_at, downstream_tenant=source["tenant_id"])
         result = _score(steps)
-        result["order_id"] = outcome.get("order_id")
-        result["order_complete"] = bool(outcome.get("complete"))
+        result["order_id"] = order["order_number"]
+        result["order_complete"] = bool(mirror.get("ok"))
+        result["platform_order_id"] = platform.get("order_id")
         return steps, result
 
     def _observe(self, run_id, steps, source_id: str, sent_at: float, downstream_tenant: str | None = None):
@@ -289,9 +334,10 @@ class LabService:
         while True:
             flows = self.store.get_normalized_flows(start=sent_at - 2, limit=20_000)
             for step in steps:
-                matched = [f for f in flows if f.source and f.destination
-                           and f.source.workload_id == source_id and f.destination.workload_id == step["target_id"]
-                           and (step["target"] == "frontend" or f.destination_port in (None, step["port"]))]
+                matched = [f for f in flows if f.source and f.source.workload_id == source_id
+                           and (f.destination.workload_id == step["target_id"] if f.destination else step["target_id"] is None)
+                           and (f.destination is not None or step["target_id"] is None)
+                           and f.destination_port in (None, step["port"])]
                 forwarded = [f for f in matched if f.verdict == "forwarded"]
                 dropped = [f for f in matched if f.verdict == "dropped"]
                 step["verdict"] = {
@@ -303,15 +349,16 @@ class LabService:
             if downstream_tenant:
                 hops = {}
                 for f in flows:
-                    if f.source and f.destination and f.source.tenant_id == downstream_tenant == f.destination.tenant_id:
+                    if f.source and f.destination and f.source.tenant_id == downstream_tenant:
                         key = (f.source.workload_name, f.destination.workload_name)
                         entry = hops.setdefault(key, {"source": key[0], "destination": key[1], "forwarded": 0, "dropped": 0})
                         entry["forwarded" if f.verdict == "forwarded" else "dropped"] += 1
                 steps[0]["downstream"] = sorted(hops.values(), key=lambda item: (item["source"], item["destination"]))
-            if all(step["verdict"]["observed"] != "not_observed" for step in steps) or self.clock() >= deadline:
+            settled = not downstream_tenant or self.clock() - sent_at >= 3  # let downstream hops (platform calls) arrive
+            if (settled and all(step["verdict"]["observed"] != "not_observed" for step in steps)) or self.clock() >= deadline:
                 break
             self._save(run_id, steps=steps)
-            time.sleep(1.0)
+            time.sleep(0.4)
         source_name = next((w.workload_name for w in self.store.workload_identities() if w.workload_id == source_id), "source")
         for step in steps:
             verdict = step["verdict"]
