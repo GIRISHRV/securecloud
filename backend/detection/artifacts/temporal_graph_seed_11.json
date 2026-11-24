@@ -21,12 +21,12 @@
   "training": {
     "calibration_windows": 4,
     "epochs": 80,
-    "final_loss": 0.011099147610366344,
+    "final_loss": 0.02227378636598587,
     "seed": 11,
     "test_windows": 4,
     "threshold": 0.5,
-    "training_time_ms": 9141.816599993035,
+    "training_time_ms": 7239.534399996046,
     "training_windows": 12
   },
-  "training_node_count": 11
+  "training_node_count": 10
 }

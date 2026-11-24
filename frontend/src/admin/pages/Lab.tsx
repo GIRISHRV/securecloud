@@ -12,7 +12,7 @@ type Group = "normal" | "rules" | "model" | "check";
 const GROUPS: Array<{ id: Group; title: string; note: string }> = [
   { id: "normal", title: "Normal activity", note: "Allowed traffic. Nothing should be flagged." },
   { id: "rules", title: "Stopped by the rules", note: "Blocked instantly; the AI then raises an incident." },
-  { id: "model", title: "Only the AI can catch", note: "The rules allow it, so only the AI model can flag it." },
+  { id: "model", title: "Allowed, but behaving oddly", note: "The rules allow the path, so the risk engine has to spot the unusual volume." },
   { id: "check", title: "Response checks", note: "Prove isolation and restore actually work." },
 ];
 const BUTTONS: Record<string, { label: string; hint: string; icon: typeof Bug; tone: "go" | "attack" | "check"; group: Group }> = {

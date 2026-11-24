@@ -32,7 +32,7 @@ def test_metrics_use_defined_denominators_and_average_precision():
 
 
 def test_scenario_catalog_is_allowlisted_and_deterministic():
-    assert len(scenario_ids()) == 12
+    assert len(scenario_ids()) == 13
     first = build_scenario("horizontal_scan", 11, 0)
     second = build_scenario("horizontal_scan", 11, 0)
     assert first == second

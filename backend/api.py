@@ -136,6 +136,21 @@ class TrafficSimulate(Body):
     port: int = Field(ge=1, le=65535)
 
 
+
+def flow_evidence(flow) -> dict:
+    """Incident evidence for one resolved flow, in the same shape as Store.get_normalized_traffic."""
+    allowed = flow.verdict == "forwarded"
+    cross = flow.source.tenant_id != flow.destination.tenant_id
+    return {
+        "id": flow.event_id, "at": flow.observed_at,
+        "sourceId": flow.source.workload_id, "destinationId": flow.destination.workload_id,
+        "sourceName": flow.source.workload_name, "destinationName": flow.destination.workload_name,
+        "sourceTenant": flow.source.tenant_id, "destinationTenant": flow.destination.tenant_id,
+        "port": flow.destination_port or 1, "decision": "allowed" if allowed else "denied",
+        "reason": "cross-tenant" if cross else "approved-intent" if allowed else "default-deny",
+    }
+
+
 def _safely(function, *args):
     try:
         function(*args)
@@ -277,12 +292,15 @@ def create_app(settings: Settings) -> FastAPI:
                     event["id"]: event
                     for event in store.get_normalized_traffic(limit=1_000, window_seconds=600)
                 }
+                flows_by_id = {flow.event_id: flow for flow in recent_flows}
                 for finding in findings:
                     evidence = [
                         evidence_by_id[event_id]
                         for event_id in finding.event_ids
                         if event_id in evidence_by_id
                     ]
+                    if not evidence:  # e.g. a volume spike on an approved path: allowed flows only
+                        evidence = [flow_evidence(flows_by_id[event_id]) for event_id in finding.event_ids[:50] if event_id in flows_by_id]
                     if evidence and store.record_detection_finding(finding, evidence):
                         new_findings += 1
                 telemetry_status.update(findings=telemetry_status["findings"] + new_findings)

@@ -3,12 +3,12 @@
 The committed manifest and summary are the compact outputs of:
 
 ```powershell
-python -m backend.experiments.runner --output runtime/experiments/temporal-final --repetitions 30 --seeds 11 29 47 71 101 --temporal-epochs 80
+python -m backend.experiments.runner --output runtime/experiments/mall-final --repetitions 30 --seeds 11 29 47 71 101 --temporal-epochs 80
 ```
 
 This is an offline, allowlisted evaluation: 30 repetitions across five seeds
 and 12 scenarios (1,800 scenario runs). Raw events, predictions, run rows and
-all five checkpoints remain under `runtime/experiments/temporal-final`.
+all five checkpoints remain under `runtime/experiments/mall-final`.
 
 Across all scenarios, the edge-frequency baseline measured 0.8462 recall,
 1.0000 precision and 0.0000 false-positive rate. The temporal-graph engine

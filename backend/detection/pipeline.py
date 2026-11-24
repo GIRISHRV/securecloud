@@ -7,6 +7,7 @@ from pathlib import Path
 
 from backend.telemetry.schema import NormalizedFlow
 from backend.telemetry.windows import build_graph_snapshots
+from backend.detection.volume import expected_rates, volume_spike
 
 from .edge_frequency import EdgeFrequencyBaseline
 from .temporal_graph import (
@@ -252,6 +253,7 @@ class TemporalGraphDetectionPipeline:
             return ()
         engine = self._engine(workloads, approved_edges)
         hidden = engine.prime(history)
+        usual_rates = expected_rates(history)
         baseline = EdgeFrequencyBaseline(
             anomaly_threshold=max(0.000_001, float(engine.threshold))
         )
@@ -295,12 +297,17 @@ class TemporalGraphDetectionPipeline:
                     "policy_denied": any(flow.policy_denied for flow in matching),
                     "horizontal_fanout": len(source_destinations[edge.source_id]) >= 3,
                     "vertical_port_fanout": len(source_ports[edge.source_id]) >= 3,
+                    # A normally quiet approved path suddenly carrying a burst (see detection.volume).
+                    "volume_spike": (edge.source_id, edge.destination_id) in approved_edges
+                    and volume_spike(edge.flow_count, usual_rates.get((edge.source_id, edge.destination_id), 0.0)),
                 }
                 if not matching:
                     continue
-                prior = accumulated_by_source.get(edge.source_id, score.anomaly_score)
+                # Risk is the higher of the link score and the volume rule.
+                anomaly = max(score.anomaly_score, 1.0 if facts["volume_spike"] else 0.0)
+                prior = accumulated_by_source.get(edge.source_id, anomaly)
                 accumulated = (
-                    self.ewma_alpha * score.anomaly_score
+                    self.ewma_alpha * anomaly
                     + (1 - self.ewma_alpha) * prior
                 )
                 accumulated_by_source[edge.source_id] = accumulated
@@ -317,7 +324,7 @@ class TemporalGraphDetectionPipeline:
                     window_end=snapshot.window_end,
                     source_id=edge.source_id,
                     destination_id=edge.destination_id,
-                    anomaly_score=score.anomaly_score,
+                    anomaly_score=anomaly,
                     accumulated_risk=accumulated,
                     baseline_score=baseline_score,
                     threshold=float(engine.threshold),
@@ -341,7 +348,7 @@ class TemporalGraphDetectionPipeline:
                     source_tenant=first.source.tenant_id,
                     destination_id=edge.destination_id,
                     predicted_probability=score.probability,
-                    anomaly_score=score.anomaly_score,
+                    anomaly_score=anomaly,
                     threshold=float(engine.threshold),
                     supporting_facts=facts,
                     event_ids=tuple(flow.event_id for flow in matching),

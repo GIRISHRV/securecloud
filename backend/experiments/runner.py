@@ -16,6 +16,7 @@ from statistics import mean
 from time import perf_counter
 
 from backend.detection.edge_frequency import EdgeFrequencyBaseline
+from backend.detection.volume import expected_rates, volume_spike
 from backend.telemetry.windows import build_graph_snapshots
 
 from .metrics import (
@@ -122,6 +123,7 @@ def run_evaluation(config: EvaluationConfig) -> dict:
     for seed in config.seeds:
         training_flows = benign_training_flows(seed)
         training_snapshots = build_graph_snapshots(training_flows, window_seconds=WINDOW_SECONDS)
+        usual_rates = expected_rates(training_snapshots)  # per-edge normal rate for the volume rule
         fit_started = perf_counter()
         baseline = EdgeFrequencyBaseline(anomaly_threshold=config.anomaly_threshold)
         baseline.fit(training_snapshots)
@@ -132,19 +134,16 @@ def run_evaluation(config: EvaluationConfig) -> dict:
         if temporal_types:
             torch, TemporalGraphEngine, WorkloadDescriptor = temporal_types
             descriptors = [
-                WorkloadDescriptor("college-web", "college", "web"),
-                WorkloadDescriptor("college-api", "college", "api"),
-                WorkloadDescriptor("college-database", "college", "database"),
-                WorkloadDescriptor("hospital-web", "hospital", "web"),
-                WorkloadDescriptor("hospital-api", "hospital", "api"),
-                WorkloadDescriptor("hospital-database", "hospital", "database"),
-                WorkloadDescriptor("college-reporting-web", "college", "web"),
-                WorkloadDescriptor("college-reporting-api", "college", "api"),
-                WorkloadDescriptor("vendor-api", "vendor", "api"),
-                WorkloadDescriptor(
-                    "retail-productcatalogservice", "retail", "api"
-                ),
-                WorkloadDescriptor("retail-cartservice", "retail", "api"),
+                WorkloadDescriptor("northstar-web", "northstar", "web"),
+                WorkloadDescriptor("northstar-api", "northstar", "api"),
+                WorkloadDescriptor("northstar-database", "northstar", "database"),
+                WorkloadDescriptor("northstar-reports-web", "northstar", "web"),
+                WorkloadDescriptor("northstar-reports-api", "northstar", "api"),
+                WorkloadDescriptor("shipfast-plugin", "northstar", "api"),
+                WorkloadDescriptor("bloom-web", "bloom", "web"),
+                WorkloadDescriptor("bloom-api", "bloom", "api"),
+                WorkloadDescriptor("bloom-database", "bloom", "database"),
+                WorkloadDescriptor("payments", "platform", "api"),
             ]
             temporal_engine = TemporalGraphEngine(
                 descriptors,
@@ -272,12 +271,17 @@ def run_evaluation(config: EvaluationConfig) -> dict:
                 if temporal_engine is not None and temporal_hidden is not None and temporal_result is not None:
                     temporal_scored: list[ScoredLabel] = []
                     temporal_first_detection: float | None = None
+                    volume_scored: list[ScoredLabel] = []
+                    volume_first_detection: float | None = None
                     scenario_hidden = temporal_hidden.clone()
                     temporal_inference_started = perf_counter()
                     for snapshot in snapshots:
                         labels = _edge_labels(scenario, snapshot)
                         scores, scenario_hidden = temporal_engine.score(snapshot, scenario_hidden)
+                        counts = {(edge.source_id, edge.destination_id): edge.flow_count for edge in snapshot.edges}
                         for score in scores:
+                            pair = (score.source_id, score.destination_id)
+                            spike = pair in scenario.approved_edges and volume_spike(counts.get(pair, 0), usual_rates.get(pair, 0.0))
                             label = labels[(score.source_id, score.destination_id)]
                             security_fact = _has_security_fact(
                                 scenario, snapshot, score.source_id, score.destination_id
@@ -286,6 +290,19 @@ def run_evaluation(config: EvaluationConfig) -> dict:
                             temporal_scored.append(
                                 ScoredLabel(score.anomaly_score, label, incident)
                             )
+                            # Temporal graph + volume rule: the spike is both risk and a rule fact.
+                            volume_incident = incident or spike
+                            volume_scored.append(ScoredLabel(max(score.anomaly_score, 1.0 if spike else 0.0), label, volume_incident))
+                            if label and volume_incident:
+                                volume_first_detection = min(volume_first_detection or snapshot.window_end, snapshot.window_end)
+                            predictions.append({
+                                "run_id": run_id, "configuration": "temporal_graph_volume", "scenario_id": scenario.id,
+                                "window_start": snapshot.window_start, "window_end": snapshot.window_end,
+                                "source_id": score.source_id, "destination_id": score.destination_id,
+                                "score": max(score.anomaly_score, 1.0 if spike else 0.0), "threshold": temporal_result.threshold,
+                                "raw_anomalous": score.is_anomalous or spike, "security_fact": security_fact or spike,
+                                "predicted_anomalous": volume_incident, "ground_truth_malicious": label,
+                            })
                             if label and incident:
                                 temporal_first_detection = min(
                                     temporal_first_detection or snapshot.window_end,
@@ -306,6 +323,21 @@ def run_evaluation(config: EvaluationConfig) -> dict:
                                 "predicted_anomalous": incident,
                                 "ground_truth_malicious": label,
                             })
+                    volume_metrics = classification_metrics(volume_scored)
+                    run_rows.append({
+                        "run_id": run_id, "configuration": "temporal_graph_volume", "scenario_id": scenario.id,
+                        "category": scenario.category, "seed": seed, "repetition": repetition,
+                        "event_count": len(scenario.flows), "malicious_event_count": malicious_count,
+                        "prevented_event_count": prevented, "prevention_rate": safe_ratio(prevented, malicious_count),
+                        **volume_metrics,
+                        "detection_latency_seconds": (
+                            volume_first_detection - first_malicious_at
+                            if volume_first_detection is not None and first_malicious_at is not None else None
+                        ),
+                        "training_time_ms": temporal_result.training_time_ms,
+                        "inference_time_ms": (perf_counter() - temporal_inference_started) * 1_000,
+                        "containment_time_ms": None, "recovery_time_ms": None, "measurement_scope": "offline",
+                    })
                     temporal_metrics = classification_metrics(temporal_scored)
                     run_rows.append({
                         "run_id": run_id,
@@ -334,7 +366,7 @@ def run_evaluation(config: EvaluationConfig) -> dict:
     summary_rows: list[dict] = []
     detector_configurations = ["edge_frequency_baseline"]
     if config.include_temporal:
-        detector_configurations.append("temporal_graph_gconvgru")
+        detector_configurations.extend(["temporal_graph_gconvgru", "temporal_graph_volume"])
     for scenario_id in (*scenario_ids(), "ALL"):
         scenario_common = None
         for configuration in detector_configurations:
@@ -424,6 +456,10 @@ def run_evaluation(config: EvaluationConfig) -> dict:
                 "implemented": config.include_temporal,
                 "reason": None if config.include_temporal else "Disabled for this evaluation run.",
                 "artifacts": temporal_artifacts,
+            },
+            "temporal_graph_volume": {
+                "implemented": config.include_temporal,
+                "measurement": "temporal graph incidents plus the quiet-path volume rule (backend/detection/volume.py)",
             },
             "live_containment": {
                 "implemented": False,

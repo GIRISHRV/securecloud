@@ -38,14 +38,14 @@
           "training": {
             "calibration_windows": 4,
             "epochs": 80,
-            "final_loss": 0.011099147610366344,
+            "final_loss": 0.02227378636598587,
             "seed": 11,
             "test_windows": 4,
             "threshold": 0.5,
-            "training_time_ms": 9141.816599993035,
+            "training_time_ms": 7239.534399996046,
             "training_windows": 12
           },
-          "training_node_count": 11
+          "training_node_count": 10
         },
         {
           "feature_names": [
@@ -70,14 +70,14 @@
           "training": {
             "calibration_windows": 4,
             "epochs": 80,
-            "final_loss": 0.009245127439498901,
+            "final_loss": 0.01272860448807478,
             "seed": 29,
             "test_windows": 4,
             "threshold": 0.5,
-            "training_time_ms": 9244.14429999888,
+            "training_time_ms": 6611.774899996817,
             "training_windows": 12
           },
-          "training_node_count": 11
+          "training_node_count": 10
         },
         {
           "feature_names": [
@@ -102,14 +102,14 @@
           "training": {
             "calibration_windows": 4,
             "epochs": 80,
-            "final_loss": 0.008829827420413494,
+            "final_loss": 0.00751681299880147,
             "seed": 47,
             "test_windows": 4,
             "threshold": 0.5,
-            "training_time_ms": 5154.155499883927,
+            "training_time_ms": 7053.775999986101,
             "training_windows": 12
           },
-          "training_node_count": 11
+          "training_node_count": 10
         },
         {
           "feature_names": [
@@ -134,14 +134,14 @@
           "training": {
             "calibration_windows": 4,
             "epochs": 80,
-            "final_loss": 0.016870038583874702,
+            "final_loss": 0.02938394621014595,
             "seed": 71,
             "test_windows": 4,
             "threshold": 0.5,
-            "training_time_ms": 5356.713699991815,
+            "training_time_ms": 8319.31409999379,
             "training_windows": 12
           },
-          "training_node_count": 11
+          "training_node_count": 10
         },
         {
           "feature_names": [
@@ -166,22 +166,26 @@
           "training": {
             "calibration_windows": 4,
             "epochs": 80,
-            "final_loss": 0.007300311699509621,
+            "final_loss": 0.02696250192821026,
             "seed": 101,
             "test_windows": 4,
             "threshold": 0.5,
-            "training_time_ms": 7163.548899930902,
+            "training_time_ms": 7671.276900000521,
             "training_windows": 12
           },
-          "training_node_count": 11
+          "training_node_count": 10
         }
       ],
       "implemented": true,
       "reason": null
+    },
+    "temporal_graph_volume": {
+      "implemented": true,
+      "measurement": "temporal graph incidents plus the quiet-path volume rule (backend/detection/volume.py)"
     }
   },
-  "elapsed_seconds": 52.32524919998832,
-  "generated_at": "2026-11-20T15:40:26.432267+00:00",
+  "elapsed_seconds": 55.475296299991896,
+  "generated_at": "2026-11-24T22:22:09.988603+00:00",
   "project": "SecureCloud: Zero Trust Security Framework for Multi-Tenant Cloud Virtualisation",
   "repetitions_per_seed": 30,
   "scenario_ids": [
@@ -196,7 +200,8 @@
     "unexpected_destination",
     "low_rate_lateral_movement",
     "suspicious_approved_path",
-    "compromised_vendor_lateral_movement"
+    "plugin_approved_path_abuse",
+    "compromised_plugin_lateral_movement"
   ],
   "seeds": [
     11,
