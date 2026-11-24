@@ -9,6 +9,7 @@ import type { Order, Product } from "./retailService";
 import {
   categoryOf, dateOnly, dateTime, Link, money, ORDER_STEPS, OrderStatus, ProductImage, stockNote, type Navigate,
 } from "./shared";
+import { SHOP } from "../shop";
 
 let justPlacedOrderId = "";
 
@@ -20,7 +21,7 @@ function AuthRequired({ navigate }: { navigate: Navigate }) {
   return (
     <StoreMessage title="Sign in to continue"
       action={<button className="sf-button sf-button-primary" onClick={() => navigate({ name: "login" })}>Sign in</button>}>
-      Your cart and orders are linked to your Northstar account.
+      Your cart and orders are linked to your SecureCloud Mall account.
     </StoreMessage>
   );
 }
@@ -53,9 +54,9 @@ export function HomePage({ navigate, category, query, clearQuery }: {
       {!filtered && featured && (
         <section className="sf-hero">
           <div className="sf-hero-copy">
-            <p className="sf-eyebrow">New season · Everyday carry</p>
-            <h1>Everyday goods, built to last.</h1>
-            <p>Bags, bottles, lamps and eyewear chosen for daily use. Fast delivery and easy returns across India.</p>
+            <p className="sf-eyebrow">{SHOP.eyebrow}</p>
+            <h1>{SHOP.heroTitle}</h1>
+            <p>{SHOP.heroText}</p>
             <div className="sf-hero-actions">
               <a href="#catalogue" className="sf-button sf-button-primary">Shop the collection <ArrowRight size={16} /></a>
               <Link className="sf-button sf-button-ghost" route={{ name: "product", id: featured.id }} navigate={navigate}>View {featured.name}</Link>
@@ -74,7 +75,7 @@ export function HomePage({ navigate, category, query, clearQuery }: {
       )}
 
       {!filtered && (
-        <section className="sf-values" aria-label="Why shop with Northstar">
+        <section className="sf-values" aria-label={`Why shop with ${SHOP.name}`}>
           <div><Truck size={20} aria-hidden="true" /><span><strong>Free delivery</strong><small>On every order, no minimum</small></span></div>
           <div><RotateCcw size={20} aria-hidden="true" /><span><strong>30-day returns</strong><small>Unused items, no questions</small></span></div>
           <div><ShieldCheck size={20} aria-hidden="true" /><span><strong>Protected checkout</strong><small>Zero-trust isolated payment service</small></span></div>
@@ -227,7 +228,7 @@ export function ProductPage({ id, navigate }: { id: string; navigate: Navigate }
           <ul className="sf-perks">
             <li><Truck size={18} aria-hidden="true" /><span><strong>Free delivery in 2–4 days</strong><small>Dispatched from our Bengaluru warehouse</small></span></li>
             <li><RotateCcw size={18} aria-hidden="true" /><span><strong>30-day returns</strong><small>Return unused items for a full refund</small></span></li>
-            <li><Lock size={18} aria-hidden="true" /><span><strong>Protected checkout</strong><small>Payment service isolated by SecureCloud policy</small></span></li>
+            <li><Lock size={18} aria-hidden="true" /><span><strong>Protected checkout</strong><small>Orders run in an isolated SecureCloud tenant</small></span></li>
           </ul>
         </div>
       </section>
@@ -531,7 +532,7 @@ function AuthShell({ title, subtitle, children }: { title: string; subtitle: str
   return (
     <section className="sf-auth">
       <div className="sf-auth-form">
-        <p className="sf-eyebrow">Northstar account</p>
+        <p className="sf-eyebrow">SecureCloud Mall account · works on every shop</p>
         <h1>{title}</h1>
         <p className="sf-muted">{subtitle}</p>
         {children}
@@ -570,7 +571,7 @@ export function AuthLogin({ navigate }: { navigate: Navigate }) {
         {error && <p className="sf-error" role="alert">{error}</p>}
         <button className="sf-button sf-button-primary sf-wide" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
       </form>
-      <p className="sf-auth-switch">New to Northstar? <button className="sf-link-button" onClick={() => navigate({ name: "register" })}>Create an account</button></p>
+      <p className="sf-auth-switch">New here? <button className="sf-link-button" onClick={() => navigate({ name: "register" })}>Create an account</button></p>
     </AuthShell>
   );
 }

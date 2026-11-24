@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><rect width="800" height="800" fill="#f5ede4"/>
+<ellipse cx="400" cy="660" rx="200" ry="26" fill="#000" opacity=".08"/>
+<rect x="240" y="300" width="320" height="360" rx="34" fill="#b98c63"/><rect x="240" y="300" width="320" height="60" rx="26" fill="#f7efe6"/>
+<rect x="290" y="430" width="220" height="120" rx="10" fill="#fff" opacity=".92"/>
+<text x="400" y="482" font-family="Georgia,serif" font-size="26" text-anchor="middle" fill="#3b3030" letter-spacing="3">BLOOM</text>
+<text x="400" y="522" font-family="Arial,sans-serif" font-size="18" text-anchor="middle" fill="#6b5e5e" letter-spacing="2">SANDALWOOD</text>
+<rect x="396" y="262" width="8" height="44" rx="3" fill="#3b3030"/>
+<path d="M400 170 C430 215 428 250 400 266 C372 250 370 215 400 170Z" fill="#f6b73c"/><path d="M400 205 C414 228 412 246 400 256 C388 246 386 228 400 205Z" fill="#fff3c4"/>
+<rect x="268" y="320" width="22" height="300" rx="11" fill="#fff" opacity=".18"/></svg>

@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, ArrowDownRight, ArrowUpRight, Database, PackageOpen, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Database, PackageOpen, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { AdminSnapshot } from "../adminService";
 import MetricCard from "@/components/kokonutui/metric-card";
 import { CATEGORIES, categoryRevenueSeries, dailySeries, dayOf, delta, periodComparison, STATUS_LABEL, STATUS_ORDER, statusCounts, topProducts } from "../analytics";
 import { BarList, Sparkline } from "../charts";
 import { Avatar, Empty, money, PageHead, Panel, relative, Status } from "../ui";
 import type { AdminPage } from "../AdminApp";
+import { SHOP } from "../../shop";
 
 const RANGES = [7, 14, 30] as const;
 
@@ -21,8 +22,6 @@ export function Dashboard({ data, navigate, refresh, onLoadSample, loadingSample
   const lowStock = data.products.filter((product) => product.stock_quantity <= 10).sort((a, b) => a.stock_quantity - b.stock_quantity);
   const needsAction = statuses.placed + statuses.processing;
   const activeIncidents = data.security.incidents.filter((incident) => incident.status !== "restored" && incident.status !== "closed");
-  const blocked = data.security.traffic.filter((event) => event.decision === "denied").length;
-  const latestRisk = data.security.risk[0];
   const revenueByCategory = useMemo(() => categoryRevenueSeries(data.orders, 60), [data.orders]);
   const incidentEvents = useMemo(() => data.security.incidents.map((incident) => ({
     date: dayOf(incident.createdAt), label: `Incident: ${incident.sourceName}`,
@@ -30,7 +29,7 @@ export function Dashboard({ data, navigate, refresh, onLoadSample, loadingSample
 
   return (
     <>
-      <PageHead title="Store overview" description={`Northstar Retail · last ${range} days`}>
+      <PageHead title="Store overview" description={`${SHOP.legal} · last ${range} days`}>
         <div className="ad-segment" role="group" aria-label="Date range">
           {RANGES.map((option) => (
             <button key={option} className={range === option ? "active" : ""} aria-pressed={range === option} onClick={() => setRange(option)}>{option}d</button>
@@ -105,18 +104,12 @@ export function Dashboard({ data, navigate, refresh, onLoadSample, loadingSample
             : <Empty title="Stock levels are healthy"><PackageOpen size={18} aria-hidden="true" /></Empty>}
         </Panel>
 
-        <Panel title="SecureCloud" subtitle="Zero-trust protection for this store" action={<button className="ad-link" onClick={() => navigate("security")}>Open</button>}>
-          <div className={`ad-posture ${activeIncidents.length ? "warn" : "ok"}`}>
-            {activeIncidents.length ? <AlertTriangle size={22} aria-hidden="true" /> : <ShieldCheck size={22} aria-hidden="true" />}
-            <div><strong>{activeIncidents.length ? "Action required" : data.apiOnline ? "Protected" : "Status unavailable"}</strong>
-              <small>{activeIncidents.length ? "An incident is open" : "No open incidents"}</small></div>
+        <Panel title="SecureCloud" subtitle="Your shop runs on the SecureCloud Mall platform">
+          <div className="ad-posture ok">
+            <ShieldCheck size={22} aria-hidden="true" />
+            <div><strong>{data.apiOnline ? "Protected by your provider" : "Status unavailable"}</strong>
+              <small>Network isolation, monitoring and incident response are run by the platform provider.</small></div>
           </div>
-          <dl className="ad-facts">
-            <div><dt>Open incidents</dt><dd>{activeIncidents.length}</dd></div>
-            <div><dt>Blocked connections</dt><dd>{blocked}</dd></div>
-            <div><dt>Detector</dt><dd>{latestRisk?.modelVersion ?? "No scores yet"}</dd></div>
-            <div><dt>Latest risk</dt><dd>{latestRisk ? `${latestRisk.accumulatedRisk.toFixed(2)} / ${latestRisk.threshold.toFixed(2)}` : "—"}</dd></div>
-          </dl>
         </Panel>
       </div>
 

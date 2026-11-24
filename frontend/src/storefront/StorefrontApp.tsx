@@ -8,12 +8,13 @@ import {
   AuthLogin, AuthRegister, CartPage, CheckoutPage, HomePage, OrderPage, OrdersPage, ProductPage, StoreMessage,
 } from "./pages";
 import "./storefront.css";
+import { SHOP, SHOP_BASE } from "../shop";
 
 export default function StorefrontApp() {
   return <RetailProvider><Storefront /></RetailProvider>;
 }
 
-const CATEGORIES = ["Bags", "Accessories", "Home"];
+const CATEGORIES = SHOP.categories;
 
 function Storefront() {
   const { user, cart, loading, error, service, acceptUser } = useRetail();
@@ -26,7 +27,7 @@ function Storefront() {
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
   }, []);
-  useEffect(() => { document.title = "Northstar · Everyday goods"; }, []);
+  useEffect(() => { document.title = `${SHOP.name} · ${SHOP.eyebrow}`; }, []);
 
   function navigate(next: Route) {
     window.history.pushState({}, "", pathFor(next));
@@ -63,9 +64,9 @@ function Storefront() {
             aria-expanded={menuOpen} aria-label={menuOpen ? "Close menu" : "Open menu"}>
             {menuOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <Link className="sf-brand" route={{ name: "home" }} navigate={navigate} ariaLabel="Northstar home">
-            <span className="sf-brand-mark" aria-hidden="true">N</span>
-            <span>Northstar</span>
+          <Link className="sf-brand" route={{ name: "home" }} navigate={navigate} ariaLabel={`${SHOP.name} home`}>
+            <span className="sf-brand-mark" aria-hidden="true">{SHOP.initial}</span>
+            <span>{SHOP.name}</span>
           </Link>
           <nav className={`sf-nav ${menuOpen ? "open" : ""}`} aria-label="Store navigation">
             <Link route={{ name: "home" }} navigate={navigate} className={route.name === "home" && !activeCategory ? "active" : ""}>Shop all</Link>
@@ -85,8 +86,8 @@ function Storefront() {
               ? <ProfileDropdown compact showPreferences={false}
                   accounts={[{ id: user.id, name: user.display_name, email: user.email, plan: user.role === "owner" ? "Owner" : "Customer" }]}
                   items={[
-                    { label: "My orders", href: "/shop/account/orders", icon: <ShoppingBag className="size-4" /> },
-                    ...(user.role === "owner" ? [{ label: "Store admin", href: "/admin", icon: <ShieldCheck className="size-4" /> }] : []),
+                    { label: "My orders", href: `${SHOP_BASE}/account/orders`, icon: <ShoppingBag className="size-4" /> },
+                    ...(user.role === "owner" ? [{ label: "Store admin", href: `${SHOP.base}/admin`, icon: <ShieldCheck className="size-4" /> }] : []),
                   ]}
                   onSignOut={() => void logout()} />
               : <Link className="sf-signin" route={{ name: "login" }} navigate={navigate}>Sign in</Link>}
@@ -120,7 +121,7 @@ function Storefront() {
         <div className="sf-footer-inner">
           <div className="sf-footer-brand">
             <Link className="sf-brand" route={{ name: "home" }} navigate={navigate}>
-              <span className="sf-brand-mark" aria-hidden="true">N</span><span>Northstar</span>
+              <span className="sf-brand-mark" aria-hidden="true">{SHOP.initial}</span><span>{SHOP.name}</span>
             </Link>
             <p>Well-made everyday goods, delivered across India.</p>
           </div>
@@ -132,7 +133,7 @@ function Storefront() {
             <h2>Account</h2>
             <Link route={{ name: "orders" }} navigate={navigate}>Order history</Link>
             <Link route={{ name: "cart" }} navigate={navigate}>Cart</Link>
-            <a href="/admin">Store admin</a>
+            <a href={`${SHOP.base}/admin`}>Store admin</a>
           </div>
           <div>
             <h2>Security</h2>
@@ -140,7 +141,7 @@ function Storefront() {
           </div>
         </div>
         <div className="sf-footer-base">
-          <span>© {new Date().getFullYear()} Northstar Retail · SecureCloud reference application</span>
+          <span>© {new Date().getFullYear()} {SHOP.legal} · runs on the SecureCloud Mall platform</span>
           <span>Payments use a project simulator. No real charges are made.</span>
         </div>
       </footer>

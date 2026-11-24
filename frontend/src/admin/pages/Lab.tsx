@@ -1,38 +1,53 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bug, CheckCircle2, ChevronDown, Crosshair, Lock, Radar, RotateCcw, ShieldCheck, ShoppingCart, XCircle } from "lucide-react";
+import { ArrowLeftRight, Bug, CheckCircle2, ChevronDown, Crosshair, Lock, Network, Radar, RefreshCcw, RotateCcw, ShieldCheck, ShoppingCart, Upload, XCircle } from "lucide-react";
 import HoldButton from "@/components/kokonutui/hold-button";
 import type { AdminService, AdminSnapshot, LabRun, LabRunSummary, LabScenario, LabStatus } from "../adminService";
 import { AreaChart } from "../charts";
 import { errorText, useToaster } from "../toast";
 import { Status, relative } from "../ui";
+import { ADMIN_API } from "../../shop";
 
 /* Short, plain labels; the full description lives in the button tooltip. */
-const BUTTONS: Record<string, { label: string; icon: typeof Bug; tone: "go" | "attack" | "check" }> = {
-  "normal-checkout": { label: "Place an order", icon: ShoppingCart, tone: "go" },
-  "vendor-lateral-movement": { label: "Attack the shop", icon: Bug, tone: "attack" },
-  "vendor-port-scan": { label: "Port scan", icon: Radar, tone: "attack" },
-  "vendor-valid-path-burst": { label: "Abuse valid access", icon: Crosshair, tone: "attack" },
-  "containment-check": { label: "Test quarantine", icon: ShieldCheck, tone: "check" },
+type Group = "normal" | "rules" | "model" | "check";
+const GROUPS: Array<{ id: Group; title: string; note: string }> = [
+  { id: "normal", title: "Normal activity", note: "Allowed traffic. Nothing should be flagged." },
+  { id: "rules", title: "Stopped by the rules", note: "Blocked instantly; the AI then raises an incident." },
+  { id: "model", title: "Only the AI can catch", note: "The rules allow it, so only the AI model can flag it." },
+  { id: "check", title: "Response checks", note: "Prove isolation and restore actually work." },
+];
+const BUTTONS: Record<string, { label: string; hint: string; icon: typeof Bug; tone: "go" | "attack" | "check"; group: Group }> = {
+  "normal-checkout": { label: "Place an order", hint: "Real Northstar order through the cluster", icon: ShoppingCart, tone: "go", group: "normal" },
+  "plugin-lateral-movement": { label: "Attack the other shop", hint: "Hacked plugin tries Bloom and shared services", icon: Bug, tone: "attack", group: "rules" },
+  "bloom-attacks-northstar": { label: "Bloom attacks Northstar", hint: "Hacked Bloom API tries to get into Northstar", icon: ArrowLeftRight, tone: "attack", group: "rules" },
+  "network-sweep": { label: "Network sweep", hint: "Plugin tries every service on the platform", icon: Network, tone: "attack", group: "rules" },
+  "plugin-port-scan": { label: "Port scan", hint: "Plugin scans ports on the order API", icon: Radar, tone: "attack", group: "rules" },
+  "data-exfiltration": { label: "Steal data out", hint: "Order API tries to send data outside the cluster", icon: Upload, tone: "attack", group: "rules" },
+  "plugin-valid-path-burst": { label: "Abuse valid access", hint: "Plugin floods the API it is allowed to use", icon: Crosshair, tone: "attack", group: "model" },
+  "containment-check": { label: "Test quarantine", hint: "Prove the plugin is cut off, or restored", icon: ShieldCheck, tone: "check", group: "check" },
+  "quarantine-restart": { label: "Restart quarantined plugin", hint: "New pod, same label: still cut off?", icon: RefreshCcw, tone: "check", group: "check" },
 };
+const ORDER = Object.keys(BUTTONS);
 
 /* Fixed map layout (viewBox 920 × 400). */
 const NODES: Record<string, { x: number; y: number; label: string }> = {
-  loadgenerator: { x: 70, y: 200, label: "Shopper" },
-  frontend: { x: 205, y: 200, label: "Storefront" },
-  checkoutservice: { x: 360, y: 120, label: "Checkout" },
-  cartservice: { x: 360, y: 285, label: "Cart" },
-  paymentservice: { x: 515, y: 60, label: "Payment" },
-  shippingservice: { x: 515, y: 150, label: "Shipping" },
-  emailservice: { x: 515, y: 235, label: "Email" },
-  "redis-cart": { x: 515, y: 330, label: "Cart DB" },
-  "vendor-web": { x: 800, y: 80, label: "Vendor web" },
-  "vendor-api": { x: 800, y: 200, label: "Vendor API" },
-  "vendor-database": { x: 800, y: 325, label: "Vendor DB" },
+  shopper: { x: 75, y: 110, label: "Shopper" },
+  "northstar-web": { x: 215, y: 110, label: "Storefront" },
+  "northstar-api": { x: 370, y: 110, label: "Order API" },
+  "northstar-database": { x: 520, y: 110, label: "Orders DB" },
+  "shipfast-plugin": { x: 215, y: 300, label: "ShipFast plugin" },
+  "bloom-web": { x: 795, y: 80, label: "Storefront" },
+  "bloom-api": { x: 795, y: 200, label: "Order API" },
+  "bloom-database": { x: 795, y: 325, label: "Orders DB" },
+  "order-ids": { x: 330, y: 465, label: "Order IDs" },
+  payments: { x: 520, y: 465, label: "Payments" },
+  email: { x: 710, y: 465, label: "Email" },
+  internet: { x: 862, y: 465, label: "Internet" },
 };
 const BASE_EDGES: Array<[string, string]> = [
-  ["loadgenerator", "frontend"], ["frontend", "checkoutservice"], ["frontend", "cartservice"],
-  ["checkoutservice", "paymentservice"], ["checkoutservice", "shippingservice"], ["checkoutservice", "emailservice"],
-  ["cartservice", "redis-cart"], ["vendor-web", "vendor-api"], ["vendor-api", "vendor-database"],
+  ["shopper", "northstar-web"], ["northstar-web", "northstar-api"], ["northstar-api", "northstar-database"],
+  ["shipfast-plugin", "northstar-api"], ["bloom-web", "bloom-api"], ["bloom-api", "bloom-database"],
+  ["northstar-api", "order-ids"], ["northstar-api", "payments"], ["northstar-api", "email"],
+  ["bloom-api", "order-ids"], ["bloom-api", "payments"], ["bloom-api", "email"],
 ];
 
 type Edge = { from: string; to: string; allowed: number; blocked: number };
@@ -65,7 +80,7 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
     let alive = true;
     const load = () => service.labRun(selectedId).then((next) => { if (alive) setRun(next); }).catch(() => undefined);
     void load();
-    const timer = window.setInterval(load, live ? 1000 : 4000);
+    const timer = window.setInterval(load, live ? 400 : 3000);
     return () => { alive = false; window.clearInterval(timer); };
   }, [selectedId, service, live]);
 
@@ -88,7 +103,7 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
   async function respond(action: "quarantine" | "restore") {
     if (!incident) return;
     const call = async (step: "quarantine" | "review" | "restore") => {
-      say("cmd", `POST /api/retail/admin/security/incidents/${incident.id}/${step}`);
+      say("cmd", `POST ${ADMIN_API}/admin/security/incidents/${incident.id}/${step}`);
       try {
         const result = await service.respondToIncident(incident.id, step);
         say(step === "review" ? "out" : "allow", `${step} → ${result.status}${result.verified ? " · verified by Cilium policy read-back" : ""}`);
@@ -108,7 +123,29 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
     });
   }
 
-  const vendor = status?.workloads["facilities-vendor-stack/vendor-api"];
+  const plugin = status?.workloads["northstar-shop-stack/shipfast-plugin"];
+  const protectedOn = status?.protection ?? true;
+  const [switching, setSwitching] = useState(false);
+
+  async function toggleProtection() {
+    const next = !protectedOn;
+    setSwitching(true);
+    say("cmd", next ? "kubectl apply  default-deny + approved intents  (SecureCloud ON)" : "kubectl delete networkpolicy --all  (SecureCloud OFF)");
+    try {
+      setStatus(await service.setProtection(next));
+      say(next ? "allow" : "drop", next ? "SecureCloud ON · tenant walls restored · detection running" : "SecureCloud OFF · no tenant walls · detection paused");
+    } catch (reason) {
+      say("error", errorText(reason, "Could not change protection"));
+    } finally { setSwitching(false); }
+  }
+
+  async function resetDemo() {
+    try {
+      setStatus(await service.resetLab());
+      setRuns([]); setSelectedId(null); setRun(null); setActions([]);
+      await refresh();
+    } catch (reason) { say("error", errorText(reason, "Could not reset")); }
+  }
   const ready = Boolean(status?.ready);
 
   return (
@@ -116,6 +153,14 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
       <header className="lab2-head">
         <div><h1>Live lab</h1><p>Click a scenario. Watch real traffic hit the cluster.</p></div>
         <div className="lab2-dots" aria-label="Lab status">
+          <button className={`lab2-switch ${protectedOn ? "on" : "off"}`} role="switch" aria-checked={protectedOn}
+            disabled={!ready || switching || Boolean(status?.running)} onClick={() => void toggleProtection()}
+            title={protectedOn ? "Turn SecureCloud off to show the same attacks with no protection" : "Turn SecureCloud back on"}>
+            <span className="knob" aria-hidden="true" />{switching ? "Switching…" : `SecureCloud ${protectedOn ? "ON" : "OFF"}`}
+          </button>
+          <button className="lab2-reset" onClick={() => void resetDemo()} disabled={Boolean(status?.running)} title="Hide earlier runs and incidents and start a clean demo">
+            <RotateCcw size={14} aria-hidden="true" />Reset
+          </button>
           <Dot ok={Boolean(status?.cluster.connected)} label="Cluster" />
           <Dot ok={Boolean(status?.telemetry.fresh)} label="Hubble" />
           <Dot ok={Boolean(status?.telemetry.detector)} label="AI model" />
@@ -123,25 +168,46 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
       </header>
 
       {status && !ready && <p className="lab2-offline">Lab is offline. Start it with <code>start.ps1</code>.</p>}
-
-      <div className="lab2-buttons" role="group" aria-label="Scenarios">
-        {scenarios.map((scenario) => {
-          const meta = BUTTONS[scenario.id] ?? { label: scenario.title, icon: Bug, tone: "attack" as const };
-          const Icon = meta.icon;
-          const active = run?.scenario_id === scenario.id;
-          return (
-            <button key={scenario.id} className={`lab2-btn ${meta.tone} ${active ? "active" : ""}`} title={scenario.summary}
-              disabled={!ready || Boolean(status?.running) || Boolean(starting)} onClick={() => void start(scenario)}>
-              <Icon size={22} aria-hidden="true" />
-              <span>{starting === scenario.id ? "Starting…" : meta.label}</span>
-            </button>
-          );
-        })}
-      </div>
+      {status && !protectedOn && <p className="lab2-unprotected"><strong>SecureCloud is OFF.</strong> No tenant walls and no detection: the cluster is flat, like a plain Kubernetes setup. Run the attacks to see what gets through.</p>}
 
       <section className="lab2-stage">
-        <LiveMap run={run} quarantined={Boolean(vendor?.quarantined)} live={live} />
-        <Outcome run={run} live={live} incident={incident} quarantined={Boolean(vendor?.quarantined)} respond={respond} />
+        <div className="lab2-board">
+          <nav className="lab2-list" aria-label="Scenarios">
+            <p className="lab2-list-title">Scenarios</p>
+            {GROUPS.map((group) => {
+              const items = [...scenarios]
+                .filter((scenario) => (BUTTONS[scenario.id]?.group ?? "rules") === group.id)
+                .sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+              if (!items.length) return null;
+              return (
+                <section key={group.id} className={`lab2-group ${group.id}`} aria-label={group.title}>
+                  <h4>{group.title}</h4>
+                  <p>{group.note}</p>
+                  <ul>
+                    {items.map((scenario) => {
+                      const meta = BUTTONS[scenario.id] ?? { label: scenario.title, hint: scenario.summary, icon: Bug, tone: "attack" as const, group: "rules" as const };
+                      const Icon = meta.icon;
+                      const active = run?.scenario_id === scenario.id;
+                      const running = active && live;
+                      return (
+                        <li key={scenario.id}>
+                          <button className={`lab2-row ${meta.tone} ${active ? "active" : ""}`} title={scenario.summary} aria-current={active || undefined}
+                            disabled={!ready || Boolean(status?.running) || Boolean(starting)} onClick={() => void start(scenario)}>
+                            <Icon className="lab2-row-icon" size={16} aria-hidden="true" />
+                            <span className="lab2-row-text"><strong>{meta.label}</strong><small>{meta.hint}</small></span>
+                            <span className="lab2-row-end" aria-hidden="true">{starting === scenario.id ? "Starting…" : running ? "Running…" : "›"}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              );
+            })}
+          </nav>
+          <LiveMap run={run} quarantined={Boolean(plugin?.quarantined)} live={live} />
+        </div>
+        <Outcome run={run} live={live} incident={incident} quarantined={Boolean(plugin?.quarantined)} respond={respond} />
       </section>
 
       <Console run={run} actions={actions} live={live} />
@@ -208,11 +274,13 @@ function LiveMap({ run, quarantined, live }: { run: LabRun | null; quarantined: 
   const source = run?.evidence.source.name;
   return (
     <div className="lab2-map">
-      <svg viewBox="0 0 920 400" role="img" aria-label="Service map with live connection verdicts">
+      <svg viewBox="0 0 920 530" role="img" aria-label="Service map with live connection verdicts">
         <rect className="zone retail" x="12" y="12" width="580" height="376" rx="16" />
-        <text className="zone-label" x="30" y="38">RetailCo</text>
+        <text className="zone-label" x="30" y="38">Northstar (bags)</text>
         <rect className="zone vendor" x="680" y="12" width="228" height="376" rx="16" />
-        <text className="zone-label" x="698" y="38">Facilities vendor</text>
+        <text className="zone-label" x="698" y="38">Bloom (candles)</text>
+        <rect className="zone platform" x="12" y="408" width="896" height="112" rx="16" />
+        <text className="zone-label" x="30" y="432">Mall platform (shared)</text>
         <line className="wall" x1="636" x2="636" y1="30" y2="182" /><line className="wall" x1="636" x2="636" y1="222" y2="370" />
         <text className="wall-label" x="636" y="206" textAnchor="middle">tenant wall</text>
 
@@ -232,9 +300,9 @@ function LiveMap({ run, quarantined, live }: { run: LabRun | null; quarantined: 
           return (
             <g key={`${edge.from}-${edge.to}`} className={blocked ? "edge blocked" : mixed ? "edge mixed" : "edge allowed"}>
               <line x1={pts.x1} y1={pts.y1} x2={end.x} y2={end.y} className="edge-line" />
-              {[0, 0.6, 1.2].map((delay) => (
+              {[0, 0.3, 0.6].map((delay) => (
                 <circle key={delay} r="5" className="packet">
-                  <animateMotion dur="1.8s" begin={`${delay}s`} repeatCount="indefinite" path={path} />
+                  <animateMotion dur="0.9s" begin={`${delay}s`} repeatCount="indefinite" path={path} />
                 </circle>
               ))}
               {(blocked || mixed) && (
@@ -252,7 +320,7 @@ function LiveMap({ run, quarantined, live }: { run: LabRun | null; quarantined: 
 
         {Object.entries(NODES).map(([id, node]) => {
           const isSource = id === source;
-          const isQuarantined = id === "vendor-api" && quarantined;
+          const isQuarantined = id === "shipfast-plugin" && quarantined;
           return (
             <g key={id} className={`node ${touched.has(id) ? "touched" : ""} ${isSource ? "source" : ""} ${isQuarantined ? "quarantined" : ""}`} transform={`translate(${node.x} ${node.y})`}>
               {isSource && live && <circle r="40" className="pulse" />}
@@ -263,7 +331,7 @@ function LiveMap({ run, quarantined, live }: { run: LabRun | null; quarantined: 
           );
         })}
       </svg>
-      <div className="lab2-legend"><span className="ok">Allowed</span><span className="bad">Blocked by SecureCloud</span>{quarantined && <span className="lock">Vendor API quarantined</span>}</div>
+      <div className="lab2-legend"><span className="ok">Allowed</span><span className="bad">Blocked by policy</span>{quarantined && <span className="lock">ShipFast plugin quarantined</span>}</div>
     </div>
   );
 }
@@ -279,7 +347,8 @@ function Outcome({ run, live, incident, quarantined, respond }: {
   const peak = run.evidence.risk.reduce((max, item) => Math.max(max, item.accumulated_risk), 0);
   const threshold = run.evidence.risk.at(-1)?.threshold ?? 0.5;
   const isOrder = run.scenario_id === "normal-checkout";
-  const isAttack = !isOrder && run.scenario_id !== "containment-check";
+  const isCheck = run.scenario_id === "containment-check" || run.scenario_id === "quarantine-restart";
+  const isAttack = !isOrder && !isCheck;
   const flagged = run.evidence.risk.length > 0 && peak >= threshold;
 
   let headline = "Sending traffic…", sub = "", tone = "wait";
@@ -290,8 +359,8 @@ function Outcome({ run, live, incident, quarantined, respond }: {
   }
   else if (!live || blocked || allowed) {
     if (isOrder) { headline = run.result?.order_complete ? "Order placed" : allowed ? "Traffic allowed" : "No traffic seen"; sub = `${allowed} connections allowed`; tone = run.result?.order_complete ? "good" : "wait"; }
-    else if (run.scenario_id === "vendor-valid-path-burst") { headline = `${allowed} allowed`; sub = flagged ? "AI flagged the pattern" : "Allowed path · AI did not flag it"; tone = "warn"; }
-    else if (run.scenario_id === "containment-check") { headline = blocked ? "Quarantine holds" : allowed ? "Access is open" : "No traffic seen"; sub = blocked ? `${blocked} attempts blocked` : `${allowed} connections allowed`; tone = blocked ? "good" : "warn"; }
+    else if (run.scenario_id === "plugin-valid-path-burst") { headline = `${allowed} allowed`; sub = flagged ? "AI flagged the pattern" : "Allowed path · AI did not flag it"; tone = "warn"; }
+    else if (isCheck) { headline = blocked ? "Quarantine holds" : allowed ? "Access is open" : "No traffic seen"; sub = blocked ? `${blocked} attempts blocked` : `${allowed} connections allowed`; tone = blocked ? "good" : "warn"; }
     else { headline = `${blocked} blocked`; sub = `${allowed} got through`; tone = allowed ? "bad" : "good"; }
   }
 
