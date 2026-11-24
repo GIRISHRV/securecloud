@@ -15,6 +15,9 @@ DEFAULT_TEMPORAL_MODEL = (
 
 settings = Settings(
     database=DB_PATH,
+    retail_database=Path(
+        os.environ.get("SECURECLOUD_RETAIL_DB", "runtime/securecloud-retail-commerce.sqlite")
+    ),
     origin=ORIGIN,
     secure_cookie=False,  # Allow loopback development cookies
     session_seconds=86400,
