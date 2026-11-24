@@ -136,7 +136,11 @@ def test_quarantine_policy_is_workload_scoped_and_denies_both_directions():
     assert policy["spec"]["endpointSelector"]["matchLabels"] == {
         "securecloud.io/workload": workload_label(request.id)
     }
-    assert policy["spec"]["ingressDeny"] == [{"fromEntities": ["all"]}]
+    ingress_deny = policy["spec"]["ingressDeny"]
+    assert {"key": "k8s:io.kubernetes.pod.namespace", "operator": "Exists"} in ingress_deny[0]["fromEndpoints"][0]["matchExpressions"]
+    assert {"world", "remote-node"} <= set(ingress_deny[1]["fromEntities"])
+    # Only kubelet probes from the local node remain, so quarantine does not crash-loop the pod.
+    assert policy["spec"]["ingress"] == [{"fromEntities": ["host"]}]
     assert policy["spec"]["egressDeny"] == [{"toEntities": ["all"]}]
 
 
