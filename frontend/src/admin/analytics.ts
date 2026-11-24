@@ -1,4 +1,5 @@
 import type { Order, Product } from "./adminService";
+import { SHOP } from "../shop";
 
 export type DayPoint = { date: Date; key: string; revenue: number; orders: number };
 
@@ -94,11 +95,11 @@ export const NEXT_STATUS: Record<Order["status"], Order["status"][]> = {
   shipped: ["delivered"], delivered: [], cancelled: [],
 };
 
-export const CATEGORIES = ["Bags", "Accessories", "Home"] as const;
-const CATEGORY_BY_CODE: Record<string, (typeof CATEGORIES)[number]> = { BAG: "Bags", ACC: "Accessories", HOM: "Home" };
+export const CATEGORIES = SHOP.categories;
+const CATEGORY_BY_CODE: Record<string, string> = SHOP.categoryByCode;
 
 export function categoryOfSku(sku: string) {
-  return CATEGORY_BY_CODE[sku.split("-")[1] ?? ""] ?? "Accessories";
+  return CATEGORY_BY_CODE[sku.split("-")[1] ?? ""] ?? CATEGORIES[0];
 }
 
 const isoDay = (date: Date) =>

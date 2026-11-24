@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { incidentSchema, riskObservationSchema, trafficSchema } from "../domain/models";
 import { orderSchema, productSchema, type Order, type Product, type RetailUser } from "../storefront/retailService";
+import { ADMIN_API, IS_PROVIDER } from "../shop";
 
 const ownerSchema = z.object({
   id: z.string(), tenant_id: z.string(), email: z.string(), display_name: z.string(),
@@ -53,6 +54,11 @@ const securitySummarySchema = z.object({
   risk: z.array(riskObservationSchema), traffic: z.array(trafficSchema),
 });
 const errorSchema = z.object({ detail: z.string() });
+const platformServiceSchema = z.object({
+  id: z.string(), name: z.string(), tenant: z.string(), stack: z.string(), kind: z.enum(["shop", "platform", "plugin"]),
+  status: z.string(), quarantined: z.boolean(), calls: z.array(z.string()),
+});
+export type PlatformService = z.infer<typeof platformServiceSchema>;
 
 
 const labStepSchema = z.object({
@@ -102,6 +108,8 @@ const labStatusSchema = z.object({
   telemetry: z.object({ enabled: z.boolean(), last_poll: z.number().nullable(), fresh: z.boolean(), accepted: z.number(), detector: z.string().nullable(), last_error: z.string().nullable() }),
   workloads: z.record(z.string(), z.object({ id: z.string(), name: z.string(), observed: z.string(), quarantined: z.boolean() }).nullable()),
   running: z.string().nullable(),
+  protection: z.boolean().default(true),
+  session_start: z.number().default(0),
 });
 export type LabStep = z.infer<typeof labStepSchema>;
 export type LabRun = z.infer<typeof labRunSchema>;
@@ -141,7 +149,7 @@ export class AdminService {
   }
 
   async session() {
-    const response = await fetch("/api/retail/auth/session");
+    const response = await fetch(`${ADMIN_API}/auth/session`);
     if (response.status === 401) return null;
     if (!response.ok) throw await this.error(response, "Could not check owner session");
     const value = sessionEnvelope.safeParse(await response.json());
@@ -151,7 +159,7 @@ export class AdminService {
   }
 
   async login(email: string, password: string) {
-    const response = await fetch("/api/retail/auth/login", {
+    const response = await fetch(`${ADMIN_API}/auth/login`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }),
     });
     if (!response.ok) throw await this.error(response, "Sign in failed");
@@ -159,7 +167,7 @@ export class AdminService {
     const value = sessionEnvelope.safeParse(raw);
     if (!value.success) {
       const csrf = typeof raw === "object" && raw && "csrf" in raw ? String(raw.csrf) : "";
-      await fetch("/api/retail/auth/logout", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: "{}" });
+      await fetch(`${ADMIN_API}/auth/logout`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: "{}" });
       throw new Error("This account does not have shop-owner access");
     }
     this.csrf = value.data.csrf;
@@ -167,7 +175,7 @@ export class AdminService {
   }
 
   async logout() {
-    const response = await fetch("/api/retail/auth/logout", { method: "POST", headers: this.headers(), body: "{}" });
+    const response = await fetch(`${ADMIN_API}/auth/logout`, { method: "POST", headers: this.headers(), body: "{}" });
     if (!response.ok) throw await this.error(response, "Sign out failed");
     this.csrf = "";
   }
@@ -179,25 +187,34 @@ export class AdminService {
   }
 
   async snapshot(): Promise<AdminSnapshot> {
+    if (IS_PROVIDER) {  // the provider sees the security plane, never a shop's business data
+      const [security, health] = await Promise.all([this.securitySummary(), fetch("/api/health").then((r) => r.ok).catch(() => false)]);
+      const overview = { orders_today: 0, revenue_today_minor: 0, open_orders: 0, active_customers: 0, currency: "INR" as const };
+      return { overview, customers: [], sessions: [], products: [], orders: [], activity: [], security, apiOnline: health };
+    }
     const [overview, customers, sessions, products, orders, activity, security, health] = await Promise.all([
-      this.get("/api/retail/admin/overview", overviewSchema),
-      this.get("/api/retail/admin/customers", z.object({ items: z.array(customerSchema) })),
-      this.get("/api/retail/admin/sessions", z.object({ items: z.array(activeSessionSchema) })),
-      this.get("/api/retail/admin/products", z.object({ items: z.array(productSchema) })),
-      this.get("/api/retail/admin/orders", z.object({ items: z.array(orderSchema) })),
-      this.get("/api/retail/admin/activity", z.object({ items: z.array(activitySchema) })),
-      this.securitySummary(),
+      this.get(`${ADMIN_API}/admin/overview`, overviewSchema),
+      this.get(`${ADMIN_API}/admin/customers`, z.object({ items: z.array(customerSchema) })),
+      this.get(`${ADMIN_API}/admin/sessions`, z.object({ items: z.array(activeSessionSchema) })),
+      this.get(`${ADMIN_API}/admin/products`, z.object({ items: z.array(productSchema) })),
+      this.get(`${ADMIN_API}/admin/orders`, z.object({ items: z.array(orderSchema) })),
+      this.get(`${ADMIN_API}/admin/activity`, z.object({ items: z.array(activitySchema) })),
+      Promise.resolve({ applicationEvents: [], incidents: [], risk: [], traffic: [] }),  // shops never see the security plane
       fetch("/api/health").then((response) => response.ok).catch(() => false),
     ]);
     return { overview, customers: customers.items, sessions: sessions.items, products: products.items, orders: orders.items, activity: activity.items, security, apiOnline: health };
   }
 
+  async platformServices() {
+    return (await this.get(`${ADMIN_API}/admin/platform/services`, z.object({ items: z.array(platformServiceSchema) }))).items;
+  }
+
   securitySummary() {
-    return this.get("/api/retail/admin/security/summary", securitySummarySchema);
+    return this.get(`${ADMIN_API}/admin/security/summary`, securitySummarySchema);
   }
 
   async respondToIncident(id: string, action: "quarantine" | "review" | "restore" | "dismiss") {
-    const response = await fetch(`/api/retail/admin/security/incidents/${encodeURIComponent(id)}/${action}`, {
+    const response = await fetch(`${ADMIN_API}/admin/security/incidents/${encodeURIComponent(id)}/${action}`, {
       method: "POST", headers: this.headers(), body: "{}",
     });
     if (!response.ok) throw await this.error(response, `Could not ${action} incident`);
@@ -205,31 +222,43 @@ export class AdminService {
   }
 
   async loadDemoCatalog() {
-    const response = await fetch("/api/retail/admin/demo/load", { method: "POST", headers: this.headers(), body: "{}" });
+    const response = await fetch(`${ADMIN_API}/admin/demo/load`, { method: "POST", headers: this.headers(), body: "{}" });
     if (!response.ok) throw await this.error(response, "Could not load sample data");
     return z.object({ items: z.array(productSchema), sample_orders: z.number().int().default(0) }).parse(await response.json());
   }
 
   async updateOrderStatus(id: string, status: Order["status"]) {
-    const response = await fetch(`/api/retail/admin/orders/${encodeURIComponent(id)}/status`, {
+    const response = await fetch(`${ADMIN_API}/admin/orders/${encodeURIComponent(id)}/status`, {
       method: "PATCH", headers: this.headers(), body: JSON.stringify({ status }),
     });
     if (!response.ok) throw await this.error(response, "Could not update order status");
     return orderSchema.parse(await response.json());
   }
 
-  labStatus() { return this.get("/api/retail/admin/lab/status", labStatusSchema); }
-  async labScenarios() { return (await this.get("/api/retail/admin/lab/scenarios", z.object({ items: z.array(labScenarioSchema) }))).items; }
-  async labRuns() { return (await this.get("/api/retail/admin/lab/runs", z.object({ items: z.array(labRunSummarySchema) }))).items; }
-  labRun(id: string) { return this.get(`/api/retail/admin/lab/runs/${encodeURIComponent(id)}`, labRunSchema); }
+  labStatus() { return this.get(`${ADMIN_API}/admin/lab/status`, labStatusSchema); }
+  async labScenarios() { return (await this.get(`${ADMIN_API}/admin/lab/scenarios`, z.object({ items: z.array(labScenarioSchema) }))).items; }
+  async labRuns() { return (await this.get(`${ADMIN_API}/admin/lab/runs`, z.object({ items: z.array(labRunSummarySchema) }))).items; }
+  labRun(id: string) { return this.get(`${ADMIN_API}/admin/lab/runs/${encodeURIComponent(id)}`, labRunSchema); }
+  async setProtection(enabled: boolean) {
+    const response = await fetch(`${ADMIN_API}/admin/lab/protection`, { method: "POST", headers: this.headers(), body: JSON.stringify({ enabled }) });
+    if (!response.ok) throw await this.error(response, "Could not change SecureCloud protection");
+    return labStatusSchema.parse(await response.json());
+  }
+
+  async resetLab() {
+    const response = await fetch(`${ADMIN_API}/admin/lab/reset`, { method: "POST", headers: this.headers(), body: "{}" });
+    if (!response.ok) throw await this.error(response, "Could not reset the demo");
+    return labStatusSchema.parse(await response.json());
+  }
+
   async startLabRun(scenarioId: string) {
-    const response = await fetch("/api/retail/admin/lab/runs", { method: "POST", headers: this.headers(), body: JSON.stringify({ scenario_id: scenarioId }) });
+    const response = await fetch(`${ADMIN_API}/admin/lab/runs`, { method: "POST", headers: this.headers(), body: JSON.stringify({ scenario_id: scenarioId }) });
     if (!response.ok) throw await this.error(response, "Could not start the lab scenario");
     return labRunSchema.parse(await response.json());
   }
 
   async createProduct(input: Pick<Product, "sku" | "name" | "description" | "price_minor" | "stock_quantity" | "published" | "image_path">) {
-    const response = await fetch("/api/retail/admin/products", {
+    const response = await fetch(`${ADMIN_API}/admin/products`, {
       method: "POST", headers: this.headers(), body: JSON.stringify({ ...input, currency: "INR" }),
     });
     if (!response.ok) throw await this.error(response, "Could not create product");
@@ -237,7 +266,7 @@ export class AdminService {
   }
 
   async updateProduct(id: string, changes: Partial<Pick<Product, "stock_quantity" | "published" | "price_minor">>) {
-    const response = await fetch(`/api/retail/admin/products/${encodeURIComponent(id)}`, {
+    const response = await fetch(`${ADMIN_API}/admin/products/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: this.headers(), body: JSON.stringify(changes),
     });
     if (!response.ok) throw await this.error(response, "Could not update product");

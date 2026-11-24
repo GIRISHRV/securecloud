@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><rect width="800" height="800" fill="#f7eee9"/>
+<ellipse cx="400" cy="650" rx="230" ry="26" fill="#000" opacity=".08"/>
+<rect x="180" y="330" width="440" height="310" rx="18" fill="#c4766b"/><rect x="160" y="290" width="480" height="70" rx="14" fill="#d98a7e"/>
+<rect x="380" y="290" width="40" height="350" fill="#f3d9a4"/>
+<path d="M400 290 C340 220 290 240 320 290Z M400 290 C460 220 510 240 480 290Z" fill="#f3d9a4"/>
+<rect x="250" y="450" width="300" height="90" rx="10" fill="#fff" opacity=".92"/>
+<text x="400" y="492" font-family="Georgia,serif" font-size="28" text-anchor="middle" fill="#3b3030" letter-spacing="3">BLOOM</text>
+<text x="400" y="524" font-family="Arial,sans-serif" font-size="16" text-anchor="middle" fill="#6b5e5e" letter-spacing="2">GIFT BOX</text></svg>

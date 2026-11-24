@@ -14,22 +14,29 @@ import { Security } from "./pages/Security";
 import { Services } from "./pages/Services";
 import { Lab } from "./pages/Lab";
 import "./admin.css";
+import { ADMIN_BASE, IS_PROVIDER, SHOP } from "../shop";
+
+const BRAND = IS_PROVIDER
+  ? { initial: "S", name: "SecureCloud", tagline: "Provider console" }
+  : { initial: SHOP.initial, name: SHOP.name, tagline: "Store administration" };
+const STOREFRONT = `${SHOP.base}/shop`;
 
 export type AdminPage = "overview" | "orders" | "customers" | "products" | "lab" | "security" | "services";
 
-const PAGES: Array<{ id: AdminPage; label: string; icon: typeof LayoutDashboard; group: "Store" | "SecureCloud" }> = [
+const ALL_PAGES: Array<{ id: AdminPage; label: string; icon: typeof LayoutDashboard; group: "Store" | "SecureCloud" }> = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, group: "Store" },
   { id: "orders", label: "Orders", icon: ShoppingBag, group: "Store" },
   { id: "customers", label: "Customers", icon: Users, group: "Store" },
   { id: "products", label: "Products", icon: Package, group: "Store" },
   { id: "lab", label: "Live lab", icon: FlaskConical, group: "SecureCloud" },
   { id: "security", label: "Security activity", icon: ShieldAlert, group: "SecureCloud" },
-  { id: "services", label: "Services", icon: Activity, group: "SecureCloud" },
+  { id: "services", label: "Shared services & plugins", icon: Activity, group: "SecureCloud" },
 ];
+const PAGES = ALL_PAGES.filter((item) => (item.group === "SecureCloud") === IS_PROVIDER);
 
 function locationState(): { page: AdminPage; id: string | null } {
-  const [first, second] = window.location.pathname.replace(/^\/admin\/?/, "").split("/");
-  const page = PAGES.some((item) => item.id === first) ? first as AdminPage : "overview";
+  const [first, second] = window.location.pathname.slice(ADMIN_BASE.length).replace(/^\//, "").split("/");
+  const page = PAGES.some((item) => item.id === first) ? first as AdminPage : PAGES[0].id;
   return { page, id: page === "orders" && second ? decodeURIComponent(second) : null };
 }
 
@@ -40,7 +47,7 @@ export default function AdminApp() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    document.title = "Northstar Admin";
+    document.title = `${BRAND.name} · ${BRAND.tagline}`;
     void service.session().then(setOwner)
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Admin is unavailable"))
       .finally(() => setChecking(false));
@@ -64,16 +71,16 @@ function OwnerLogin({ service, initialError, onSuccess }: { service: AdminServic
   return (
     <main className="ad-login">
       <section className="ad-login-card">
-        <div className="ad-brand ad-brand-dark"><span className="ad-brand-mark">N</span><span><strong>Northstar</strong><small>Store administration</small></span></div>
-        <h1>Sign in to your store</h1>
-        <p>Orders, customers, inventory and SecureCloud protection in one place.</p>
+        <div className="ad-brand ad-brand-dark"><span className="ad-brand-mark">{BRAND.initial}</span><span><strong>{BRAND.name}</strong><small>{BRAND.tagline}</small></span></div>
+        <h1>{IS_PROVIDER ? "Sign in to the provider console" : "Sign in to your store"}</h1>
+        <p>{IS_PROVIDER ? "Service map, live lab, incidents, shared services and plugins for every shop on the platform." : "Orders, customers and products for your shop. One SecureCloud Mall account works everywhere."}</p>
         <form className="ad-form" onSubmit={(event) => void submit(event)}>
           <label>Email<input name="email" type="email" required autoComplete="email" /></label>
           <label>Password<input name="password" type="password" required autoComplete="current-password" /></label>
           {error && <p className="ad-inline-error" role="alert">{error}</p>}
           <button className="ad-button ad-button-primary ad-button-block" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
         </form>
-        <a className="ad-login-back" href="/shop">← Back to storefront</a>
+        {!IS_PROVIDER && <a className="ad-login-back" href={STOREFRONT}>← Back to storefront</a>}
       </section>
       <aside className="ad-login-art" aria-hidden="true">
         <div className="ad-login-art-inner">
@@ -115,7 +122,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
     return () => window.removeEventListener("popstate", pop);
   }, []);
   useEffect(() => {
-    if (!data) return;
+    if (!data || !IS_PROVIDER) return;
     let active = true;
     const timer = window.setInterval(() => {
       void service.securitySummary()
@@ -126,7 +133,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
   }, [data !== null, page, service]);
 
   function navigate(next: AdminPage, nextId: string | null = null) {
-    const path = next === "overview" ? "/admin" : `/admin/${next}${nextId ? `/${encodeURIComponent(nextId)}` : ""}`;
+    const path = next === PAGES[0].id ? ADMIN_BASE : `${ADMIN_BASE}/${next}${nextId ? `/${encodeURIComponent(nextId)}` : ""}`;
     window.history.pushState({}, "", path);
     setLocation({ page: next, id: nextId });
     setMenu(false);
@@ -165,7 +172,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
       { id: "group:products", label: "Find a product", group: "Search", icon: <Package size={16} />, placeholder: "Name or SKU",
         children: data.products.map((product) => ({ id: `product:${product.name}`, label: product.name, keywords: [product.sku] })) },
       { id: "action:sample", label: "Load sample data", group: "Actions", icon: <Database size={16} /> },
-      { id: "action:storefront", label: "Open storefront", group: "Actions", icon: <ExternalLink size={16} />, href: "/shop" },
+      ...(IS_PROVIDER ? [] : [{ id: "action:storefront", label: "Open storefront", group: "Actions", icon: <ExternalLink size={16} />, href: STOREFRONT }]),
     ];
   }, [data]);
   function runCommand(item: CommandItem) {
@@ -176,15 +183,15 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
     if (kind === "customer") { navigate("customers"); setQuery(value); }
     if (kind === "product") { navigate("products"); setQuery(value); }
     if (kind === "action" && value === "sample") return loadSample();
-    if (kind === "action" && value === "storefront") window.open("/shop", "_blank", "noreferrer");
+    if (kind === "action" && value === "storefront") window.open(STOREFRONT, "_blank", "noreferrer");
   }
 
   return (
     <ToasterContext.Provider value={toaster}>
     <div className="ad-app">
       <aside className={`ad-sidebar ${menu ? "open" : ""}`}>
-        <a className="ad-brand" href="/admin"><span className="ad-brand-mark">N</span><span><strong>Northstar</strong><small>Store administration</small></span></a>
-        {(["Store", "SecureCloud"] as const).map((group) => (
+        <a className="ad-brand" href={ADMIN_BASE}><span className="ad-brand-mark">{BRAND.initial}</span><span><strong>{BRAND.name}</strong><small>{BRAND.tagline}</small></span></a>
+        {(IS_PROVIDER ? ["SecureCloud"] as const : ["Store"] as const).map((group) => (
           <div key={group} className="ad-nav-group">
             <p>{group}</p>
             <nav aria-label={group === "Store" ? "Admin navigation" : "SecureCloud navigation"}>
@@ -201,23 +208,23 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
             </nav>
           </div>
         ))}
-        <a className="ad-nav-external" href="/shop" target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" />View storefront</a>
+        {!IS_PROVIDER && <a className="ad-nav-external" href={STOREFRONT} target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" />View storefront</a>}
         <div className="ad-sidebar-status">
           <span className={`ad-pulse ${data?.apiOnline ? "on" : "off"}`} aria-hidden="true" />
-          <div><strong>{data?.apiOnline ? "SecureCloud connected" : "Status unavailable"}</strong><small>{openIncidents ? `${openIncidents} open incident${openIncidents === 1 ? "" : "s"}` : "No open incidents"}</small></div>
+          <div><strong>{data?.apiOnline ? (IS_PROVIDER ? "Platform online" : "Protected by SecureCloud") : "Status unavailable"}</strong><small>{IS_PROVIDER ? (openIncidents ? `${openIncidents} open incident${openIncidents === 1 ? "" : "s"}` : "No open incidents") : "Security is managed by your platform provider"}</small></div>
         </div>
       </aside>
       {menu && <button className="ad-sidebar-scrim" aria-label="Close navigation" onClick={() => setMenu(false)} />}
       <div className="ad-content">
         <header className="ad-topbar">
           <button className="ad-icon-button ad-menu" onClick={() => setMenu((value) => !value)} aria-label="Toggle admin navigation">{menu ? <X size={18} /> : <Menu size={18} />}</button>
-          <div className="ad-crumb"><span>Northstar</span><span aria-hidden="true">/</span><strong>{current.label}</strong></div>
-          <ActionSearchBar className="ad-command" items={commands} defaultRecent={["page:orders", "page:security"]}
-            onSelect={(item) => runCommand(item)} shortcut label="Search admin" placeholder="Search orders, customers, products…" />
+          <div className="ad-crumb"><span>{BRAND.name}</span><span aria-hidden="true">/</span><strong>{current.label}</strong></div>
+          <ActionSearchBar className="ad-command" items={commands} defaultRecent={IS_PROVIDER ? ["page:lab", "page:security"] : ["page:orders", "page:products"]}
+            onSelect={(item) => runCommand(item)} shortcut label="Search admin" placeholder={IS_PROVIDER ? "Go to a page…" : "Search orders, customers, products…"} />
           <div className="ad-topbar-end">
             <ProfileDropdown compact showPreferences={false}
-              accounts={[{ id: owner.id, name: owner.display_name, email: owner.email, plan: "Owner" }]}
-              items={[{ label: "Storefront", href: "/shop", icon: <ShoppingBag className="size-4" /> }]}
+              accounts={[{ id: owner.id, name: owner.display_name, email: owner.email, plan: IS_PROVIDER ? "Provider" : "Owner" }]}
+              items={IS_PROVIDER ? [] : [{ label: "Storefront", href: STOREFRONT, icon: <ShoppingBag className="size-4" /> }]}
               onSignOut={() => void logout()} />
           </div>
         </header>
@@ -233,7 +240,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
                 {page === "products" && <Products data={data} service={service} query={query} setQuery={setQuery} refresh={refresh} onLoadSample={loadSample} loadingSample={loadingSample} />}
                 {page === "lab" && <Lab data={data} service={service} refresh={refresh} />}
                 {page === "security" && <Security data={data} service={service} refresh={refresh} />}
-                {page === "services" && <Services data={data} refresh={refresh} />}
+                {page === "services" && <Services service={service} />}
               </>
             )}
         </main>

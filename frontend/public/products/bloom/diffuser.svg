@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><rect width="800" height="800" fill="#e9f3f0"/>
+<ellipse cx="400" cy="660" rx="170" ry="24" fill="#000" opacity=".08"/>
+<g stroke="#8a6a4a" stroke-width="7" stroke-linecap="round"><line x1="390" y1="420" x2="300" y2="150"/><line x1="400" y1="420" x2="400" y2="130"/><line x1="410" y1="420" x2="500" y2="150"/><line x1="395" y1="420" x2="350" y2="140"/><line x1="405" y1="420" x2="455" y2="140"/></g>
+<path d="M330 420 h140 v40 c60 30 80 90 80 140 c0 40 -30 60 -70 60 h-160 c-40 0 -70 -20 -70 -60 c0 -50 20 -110 80 -140z" fill="#7fb7a6" opacity=".9"/>
+<rect x="320" y="540" width="160" height="70" rx="8" fill="#fff" opacity=".92"/>
+<text x="400" y="572" font-family="Georgia,serif" font-size="22" text-anchor="middle" fill="#2f3b37" letter-spacing="3">BLOOM</text>
+<text x="400" y="598" font-family="Arial,sans-serif" font-size="14" text-anchor="middle" fill="#55635e" letter-spacing="2">EUCALYPTUS</text></svg>

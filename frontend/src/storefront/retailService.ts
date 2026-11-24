@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SHOP } from "../shop";
 
 const userSchema = z.object({
   id: z.string().min(1),
@@ -104,7 +105,7 @@ export class RetailService {
   }
 
   async session() {
-    const response = await fetch("/api/retail/auth/session");
+    const response = await fetch(`${SHOP.api}/auth/session`);
     if (response.status === 401) return null;
     if (!response.ok) throw await this.error(response, "Could not check your session");
     const value = sessionSchema.parse(await response.json());
@@ -113,7 +114,7 @@ export class RetailService {
   }
 
   async register(input: { email: string; password: string; display_name: string; phone: string }) {
-    const response = await fetch("/api/retail/auth/register", {
+    const response = await fetch(`${SHOP.api}/auth/register`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
     });
     if (!response.ok) throw await this.error(response, "Could not create account");
@@ -121,7 +122,7 @@ export class RetailService {
   }
 
   async login(email: string, password: string) {
-    const response = await fetch("/api/retail/auth/login", {
+    const response = await fetch(`${SHOP.api}/auth/login`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }),
     });
     if (!response.ok) throw await this.error(response, "Sign in failed");
@@ -131,7 +132,7 @@ export class RetailService {
   }
 
   async logout() {
-    const response = await fetch("/api/retail/auth/logout", {
+    const response = await fetch(`${SHOP.api}/auth/logout`, {
       method: "POST", headers: this.mutationHeaders(), body: "{}",
     });
     if (!response.ok) throw await this.error(response, "Sign out failed");
@@ -139,19 +140,19 @@ export class RetailService {
   }
 
   async products() {
-    const response = await fetch("/api/retail/products");
+    const response = await fetch(`${SHOP.api}/products`);
     if (!response.ok) throw await this.error(response, "Could not load products");
     return productsSchema.parse(await response.json()).items;
   }
 
   async cart() {
-    const response = await fetch("/api/retail/cart");
+    const response = await fetch(`${SHOP.api}/cart`);
     if (!response.ok) throw await this.error(response, "Could not load cart");
     return cartSchema.parse(await response.json());
   }
 
   async setCartItem(productId: string, quantity: number) {
-    const response = await fetch("/api/retail/cart/items", {
+    const response = await fetch(`${SHOP.api}/cart/items`, {
       method: "POST", headers: this.mutationHeaders(),
       body: JSON.stringify({ product_id: productId, quantity }),
     });
@@ -160,7 +161,7 @@ export class RetailService {
   }
 
   async updateCartItem(productId: string, quantity: number) {
-    const response = await fetch(`/api/retail/cart/items/${encodeURIComponent(productId)}`, {
+    const response = await fetch(`${SHOP.api}/cart/items/${encodeURIComponent(productId)}`, {
       method: "PATCH", headers: this.mutationHeaders(), body: JSON.stringify({ quantity }),
     });
     if (!response.ok) throw await this.error(response, "Could not update quantity");
@@ -168,7 +169,7 @@ export class RetailService {
   }
 
   async removeCartItem(productId: string) {
-    const response = await fetch(`/api/retail/cart/items/${encodeURIComponent(productId)}`, {
+    const response = await fetch(`${SHOP.api}/cart/items/${encodeURIComponent(productId)}`, {
       method: "DELETE", headers: this.mutationHeaders(), body: "{}",
     });
     if (!response.ok) throw await this.error(response, "Could not remove item");
@@ -176,7 +177,7 @@ export class RetailService {
   }
 
   async checkout(address: Record<string, string>, key: string) {
-    const response = await fetch("/api/retail/checkout", {
+    const response = await fetch(`${SHOP.api}/checkout`, {
       method: "POST", headers: this.mutationHeaders(key), body: JSON.stringify(address),
     });
     if (!response.ok) throw await this.error(response, "Checkout failed");
@@ -184,13 +185,13 @@ export class RetailService {
   }
 
   async orders() {
-    const response = await fetch("/api/retail/orders");
+    const response = await fetch(`${SHOP.api}/orders`);
     if (!response.ok) throw await this.error(response, "Could not load orders");
     return ordersSchema.parse(await response.json()).items;
   }
 
   async order(id: string) {
-    const response = await fetch(`/api/retail/orders/${encodeURIComponent(id)}`);
+    const response = await fetch(`${SHOP.api}/orders/${encodeURIComponent(id)}`);
     if (!response.ok) throw await this.error(response, "Order not found");
     return orderSchema.parse(await response.json());
   }

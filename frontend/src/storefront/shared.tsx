@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Order, Product } from "./retailService";
+import { SHOP, SHOP_BASE } from "../shop";
 
 export type Route =
   | { name: "home"; category?: string }
@@ -22,7 +23,7 @@ export const dateTime = (seconds: number) =>
 export const dateOnly = (seconds: number) =>
   new Date(seconds * 1000).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 
-const CATEGORY_BY_CODE: Record<string, string> = { BAG: "Bags", ACC: "Accessories", HOM: "Home" };
+const CATEGORY_BY_CODE: Record<string, string> = SHOP.categoryByCode;
 
 export function categoryOf(product: Pick<Product, "sku">) {
   const code = product.sku.split("-")[1] ?? "";
@@ -30,7 +31,7 @@ export function categoryOf(product: Pick<Product, "sku">) {
 }
 
 export function routeFromPath(): Route {
-  const path = window.location.pathname.replace(/^\/shop\/?/, "").split("/").filter(Boolean);
+  const path = window.location.pathname.slice(SHOP_BASE.length).split("/").filter(Boolean);
   const category = new URLSearchParams(window.location.search).get("category") ?? undefined;
   if (!path.length) return { name: "home", category };
   if (path[0] === "products" && path[1]) return { name: "product", id: decodeURIComponent(path[1]) };
@@ -44,11 +45,11 @@ export function routeFromPath(): Route {
 }
 
 export function pathFor(route: Route) {
-  if (route.name === "home") return route.category ? `/shop?category=${encodeURIComponent(route.category)}` : "/shop";
-  if (route.name === "product") return `/shop/products/${encodeURIComponent(route.id)}`;
-  if (route.name === "orders") return "/shop/account/orders";
-  if (route.name === "order") return `/shop/account/orders/${encodeURIComponent(route.id)}`;
-  return `/shop/${route.name}`;
+  if (route.name === "home") return route.category ? `${SHOP_BASE}?category=${encodeURIComponent(route.category)}` : SHOP_BASE;
+  if (route.name === "product") return `${SHOP_BASE}/products/${encodeURIComponent(route.id)}`;
+  if (route.name === "orders") return `${SHOP_BASE}/account/orders`;
+  if (route.name === "order") return `${SHOP_BASE}/account/orders/${encodeURIComponent(route.id)}`;
+  return `${SHOP_BASE}/${route.name}`;
 }
 
 export function Link({ route, navigate, children, className = "", ariaLabel }: {

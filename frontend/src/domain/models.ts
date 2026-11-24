@@ -33,7 +33,7 @@ export const stackServiceSchema = z.object({
   dependencies: z.array(z.string().min(1)).max(20),
 });
 export const stackDefinitionSchema = z.object({
-  id: z.enum(["retail-stack", "facilities-vendor-stack"]),
+  id: z.enum(["retail-stack", "facilities-vendor-stack", "northstar-shop-stack", "bloom-shop-stack"]),
   name: text,
   description: text,
   version: z.string().min(1).max(80),
