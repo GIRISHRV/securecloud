@@ -51,6 +51,13 @@ body {
   overflow-x: hidden;
 }
 
+.route-loader {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #fafafa;
+}
+
 button,
 input,
 select {

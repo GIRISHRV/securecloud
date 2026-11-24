@@ -96,7 +96,7 @@ export const incidentSchema = z.object({
   sourceId: text,
   sourceName: text,
   tenantId: tenantIdSchema,
-  status: z.enum(["alert", "quarantined", "review", "restored"]),
+  status: z.enum(["alert", "quarantined", "review", "restored", "closed"]),
   reason: text,
   createdAt: timestamp,
   restoredAt: timestamp.nullish(),
