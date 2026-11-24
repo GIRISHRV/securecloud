@@ -9,20 +9,18 @@ from backend.telemetry.schema import NormalizedFlow, WorkloadIdentity
 
 WINDOW_SECONDS = 30
 BASE_TIME = 1_700_000_000.0
-BASE_APPROVED_EDGES = {
-    ("college-web", "college-api"),
-    ("college-api", "college-database"),
-    ("hospital-web", "hospital-api"),
-    ("hospital-api", "hospital-database"),
-    ("vendor-api", "retail-productcatalogservice"),
-}
+# Mall topology: two shops, the ShipFast plugin installed in Northstar, and shared payments.
 BASE_APPROVED_PORTS = {
-    ("college-web", "college-api"): 8080,
-    ("college-api", "college-database"): 5432,
-    ("hospital-web", "hospital-api"): 8080,
-    ("hospital-api", "hospital-database"): 5432,
-    ("vendor-api", "retail-productcatalogservice"): 3550,
+    ("northstar-web", "northstar-api"): 8080,
+    ("northstar-api", "northstar-database"): 5432,
+    ("bloom-web", "bloom-api"): 8080,
+    ("bloom-api", "bloom-database"): 5432,
+    ("northstar-api", "payments"): 8080,
+    ("bloom-api", "payments"): 8080,
+    ("shipfast-plugin", "northstar-api"): 8080,  # the plugin's only grant; it syncs occasionally
 }
+BASE_APPROVED_EDGES = set(BASE_APPROVED_PORTS)
+QUIET_EDGES = {("shipfast-plugin", "northstar-api")}
 
 
 @dataclass(frozen=True)
@@ -37,10 +35,9 @@ class Scenario:
 
 def _identity(workload_id: str) -> WorkloadIdentity:
     tenant = (
-        "hospital" if workload_id.startswith("hospital-")
-        else "vendor" if workload_id.startswith("vendor-")
-        else "retail" if workload_id.startswith("retail-")
-        else "college"
+        "bloom" if workload_id.startswith("bloom-")
+        else "platform" if workload_id in {"payments", "email", "order-ids"}
+        else "northstar"  # northstar-* and the ShipFast plugin installed in Northstar
     )
     return WorkloadIdentity(tenant, workload_id, workload_id)
 
@@ -89,7 +86,9 @@ def benign_training_flows(seed: int, windows: int = 20) -> list[NormalizedFlow]:
         start = BASE_TIME + window * WINDOW_SECONDS
         for edge_index, (source, destination) in enumerate(edges):
             port = BASE_APPROVED_PORTS[(source, destination)]
-            for sample in range(2 + rng.randrange(3)):
+            # Busy paths carry 2-4 connections per window; the plugin syncs once every few windows.
+            samples = (1 if window % 4 == 0 else 0) if (source, destination) in QUIET_EDGES else 2 + rng.randrange(3)
+            for sample in range(samples):
                 flows.append(_flow(
                     f"train-{seed}-{window}-{edge_index}-{sample}",
                     start + 1 + sample,
@@ -112,40 +111,38 @@ def build_scenario(scenario_id: str, seed: int, repetition: int) -> Scenario:
     if scenario_id == "normal_service_traffic":
         for index in range(24):
             source, destination = rng.choice(sorted(approved))
-            specs.append((index, source, destination, 8080 if source.endswith("-web") else 5432, False, False))
+            specs.append((index, source, destination, BASE_APPROVED_PORTS[(source, destination)], False, False))
     elif scenario_id == "legitimate_surge":
-        specs.extend((index / 4, "college-web", "college-api", 8080, False, False) for index in range(80))
+        specs.extend((index / 4, "northstar-web", "northstar-api", 8080, False, False) for index in range(80))
     elif scenario_id == "workload_restart":
-        specs.extend((index, "hospital-web", "hospital-api", 8080, False, False) for index in range(6))
-        specs.extend((45 + index, "hospital-web", "hospital-api", 8080, False, False) for index in range(6))
+        specs.extend((index, "bloom-web", "bloom-api", 8080, False, False) for index in range(6))
+        specs.extend((45 + index, "bloom-web", "bloom-api", 8080, False, False) for index in range(6))
     elif scenario_id == "new_approved_deployment":
-        approved.add(("college-reporting-web", "college-reporting-api"))
-        specs.extend((index, "college-reporting-web", "college-reporting-api", 8080, False, False) for index in range(12))
+        approved.add(("northstar-reports-web", "northstar-reports-api"))
+        specs.extend((index, "northstar-reports-web", "northstar-reports-api", 8080, False, False) for index in range(12))
     elif scenario_id == "temporary_service_failure":
-        specs.extend((index, "hospital-api", "hospital-database", 5432, False, True) for index in range(8))
+        specs.extend((index, "bloom-api", "bloom-database", 5432, False, True) for index in range(8))
     elif scenario_id == "cross_tenant_attempt":
-        specs.extend((index, "college-web", "hospital-api", 8080, True, False) for index in range(8))
+        specs.extend((index, "northstar-web", "bloom-api", 8080, True, False) for index in range(8))
     elif scenario_id == "horizontal_scan":
-        destinations = ["hospital-api", "hospital-database", "college-database"]
-        specs.extend((index * 2, "college-web", destination, 8080, True, False) for index, destination in enumerate(destinations))
+        destinations = ["bloom-api", "bloom-database", "northstar-database"]
+        specs.extend((index * 2, "northstar-web", destination, 8080, True, False) for index, destination in enumerate(destinations))
     elif scenario_id == "vertical_port_scan":
         for index, port in enumerate([22, 80, 443, 3306, 5432, 6379, 8080, 9000]):
-            specs.append((index * 2, "college-web", "college-api", port, True, False))
+            specs.append((index * 2, "northstar-web", "northstar-api", port, True, False))
     elif scenario_id == "unexpected_destination":
-        specs.extend((index, "hospital-api", "college-database", 5432, True, False) for index in range(6))
+        specs.extend((index, "bloom-api", "northstar-database", 5432, True, False) for index in range(6))
     elif scenario_id == "low_rate_lateral_movement":
-        specs.extend((index * 35, "college-web", "hospital-api", 8080, True, False) for index in range(4))
+        specs.extend((index * 35, "northstar-web", "bloom-api", 8080, True, False) for index in range(4))
     elif scenario_id == "suspicious_approved_path":
-        specs.extend((index / 5, "college-web", "college-api", 8080, True, False) for index in range(100))
-    elif scenario_id == "compromised_vendor_lateral_movement":
-        specs.extend(
-            (index, "vendor-api", "retail-productcatalogservice", 3550, False, False)
-            for index in range(6)
-        )
-        specs.extend(
-            (10 + index * 4, "vendor-api", "retail-cartservice", 7070, True, False)
-            for index in range(6)
-        )
+        # Abuse of a busy path: indistinguishable from a legitimate surge by volume alone.
+        specs.extend((index / 5, "northstar-web", "northstar-api", 8080, True, False) for index in range(100))
+    elif scenario_id == "plugin_approved_path_abuse":
+        # The hacked plugin floods the order API it is allowed to use (a normally quiet path).
+        specs.extend((index / 5, "shipfast-plugin", "northstar-api", 8080, True, False) for index in range(100))
+    elif scenario_id == "compromised_plugin_lateral_movement":
+        specs.extend((index, "shipfast-plugin", "northstar-api", 8080, False, False) for index in range(2))
+        specs.extend((10 + index * 4, "shipfast-plugin", "payments", 8080, True, False) for index in range(6))
 
     flows: list[NormalizedFlow] = []
     malicious_ids: set[str] = set()
@@ -180,5 +177,6 @@ def scenario_ids() -> tuple[str, ...]:
         "unexpected_destination",
         "low_rate_lateral_movement",
         "suspicious_approved_path",
-        "compromised_vendor_lateral_movement",
+        "plugin_approved_path_abuse",
+        "compromised_plugin_lateral_movement",
     )

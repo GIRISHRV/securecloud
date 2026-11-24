@@ -28,6 +28,7 @@ const REASONS: Record<string, string> = {
   policy_denied: "Its connections were blocked by the security rules",
   horizontal_fanout: "Contacted many different services at once",
   vertical_port_fanout: "Tried many different ports on one service",
+  volume_spike: "Sent a sudden burst of requests over a path that is normally quiet",
 };
 
 const TIMELINE: Record<string, string> = {

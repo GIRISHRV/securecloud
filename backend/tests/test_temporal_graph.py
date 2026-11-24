@@ -10,14 +10,16 @@ from backend.telemetry.windows import build_graph_snapshots
 
 
 WORKLOADS = [
-    WorkloadDescriptor("college-web", "college", "web"),
-    WorkloadDescriptor("college-api", "college", "api"),
-    WorkloadDescriptor("college-database", "college", "database"),
-    WorkloadDescriptor("hospital-web", "hospital", "web"),
-    WorkloadDescriptor("hospital-api", "hospital", "api"),
-    WorkloadDescriptor("hospital-database", "hospital", "database"),
-    WorkloadDescriptor("college-reporting-web", "college", "web"),
-    WorkloadDescriptor("college-reporting-api", "college", "api"),
+    WorkloadDescriptor("northstar-web", "northstar", "web"),
+    WorkloadDescriptor("northstar-api", "northstar", "api"),
+    WorkloadDescriptor("northstar-database", "northstar", "database"),
+    WorkloadDescriptor("northstar-reports-web", "northstar", "web"),
+    WorkloadDescriptor("northstar-reports-api", "northstar", "api"),
+    WorkloadDescriptor("shipfast-plugin", "northstar", "api"),
+    WorkloadDescriptor("bloom-web", "bloom", "web"),
+    WorkloadDescriptor("bloom-api", "bloom", "api"),
+    WorkloadDescriptor("bloom-database", "bloom", "database"),
+    WorkloadDescriptor("payments", "platform", "api"),
 ]
 
 
@@ -34,8 +36,8 @@ def test_temporal_graph_training_is_chronological_and_scores_edges():
     scenario = build_scenario("cross_tenant_attempt", 11, 0)
     observed = build_graph_snapshots(scenario.flows, window_seconds=30)[0]
     scores, next_hidden = engine.score(observed, hidden)
-    assert scores[0].source_id == "college-web"
-    assert scores[0].destination_id == "hospital-api"
+    assert scores[0].source_id == "northstar-web"
+    assert scores[0].destination_id == "bloom-api"
     assert 0 <= scores[0].probability <= 1
     assert next_hidden.shape == hidden.shape
 

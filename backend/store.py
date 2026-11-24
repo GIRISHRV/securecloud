@@ -990,7 +990,9 @@ class Store:
                 for item in evidence
             ]
             reason = (
-                f"Unexpected graph edge scored {finding.anomaly_score:.3f} "
+                "Sudden burst of traffic on a normally quiet approved path"
+                if finding.supporting_facts.get("volume_spike") and not finding.supporting_facts.get("policy_denied")
+                else f"Unexpected graph edge scored {finding.anomaly_score:.3f} "
                 f"(threshold {finding.threshold:.3f})"
             )
             trace = [{
