@@ -6,7 +6,7 @@ from pathlib import Path
 import secrets
 from typing import Mapping
 
-from backend.catalog import stack_definition
+from backend.catalog import PLATFORM_PROFILES, PLATFORM_TENANT_ID, PLUGIN_PROFILES, SHOP_STACKS, stack_definition
 from backend.experiments.retail_spike import prepare_documents
 
 from .base import (
@@ -42,6 +42,9 @@ TEMPLATES = {
 }
 
 REFERENCE_PROFILES = {"college", "hospital"}
+SHOP_PROFILES = {"northstar", "bloom", "shipfast", "orderids", "payments", "email"}
+SHOP_IMAGE = "docker.io/securecloud/reference-api:0.5.0"
+NOT_PLUGIN = {"key": "securecloud.io/role", "operator": "NotIn", "values": ["plugin"]}
 REFERENCE_SECRET = "securecloud-reference-db"
 
 
@@ -119,6 +122,26 @@ class KubernetesInfrastructure:
             raise InfrastructureUnavailable("Lab workload pod has no IP yet")
         return pod.status.pod_ip
 
+    def restart_workload(self, namespace: str, workload_id: str, deployment: str, timeout: float = 90.0):
+        """Replace a lab workload's pod (like `kubectl rollout restart`); returns (old, new, seconds)."""
+        import time as _time
+        old = self._running_pod(namespace, workload_id).metadata.name
+        started = _time.time()
+        body = {"spec": {"template": {"metadata": {"annotations": {"securecloud.io/restarted-at": str(int(started))}}}}}
+        try:
+            self.apps.patch_namespaced_deployment(deployment, namespace, body)
+        except Exception as exc:
+            raise self._translate(exc) from exc
+        while _time.time() - started < timeout:
+            _time.sleep(1.0)
+            try:
+                pod = self._running_pod(namespace, workload_id)
+            except InfrastructureError:
+                continue
+            if pod.metadata.name != old:
+                return old, pod.metadata.name, _time.time() - started
+        raise InfrastructurePending("The replacement pod did not become ready in time")
+
     def exec_in_workload(self, namespace: str, workload_id: str, argv: list[str], timeout: float = 90.0) -> str:
         """Run a server-built lab command in a workload's first container (lab harness only)."""
         from kubernetes.stream import stream
@@ -167,6 +190,8 @@ class KubernetesInfrastructure:
                 return self._deploy_retail_stack(stack, components)
             if stack.stack_id == "facilities-vendor-stack":
                 return self._deploy_facilities_vendor_stack(stack, components)
+            if stack.stack_id in SHOP_STACKS:
+                return self._deploy_shop_stack(stack, components)
             raise ValueError("Stack has no Kubernetes reconciler")
         except (InfrastructureError, ValueError):
             raise
@@ -262,6 +287,30 @@ class KubernetesInfrastructure:
             raise InfrastructurePending(
                 "Retail stack has not become fully available", result
             )
+        return result
+
+    def _deploy_shop_stack(self, stack: StackRequest, components: Mapping[str, WorkloadRequest]) -> StackObservation:
+        definition = stack_definition(stack.stack_id)
+        if definition is None or set(components) != {service.id for service in definition.services}:
+            raise InfrastructureError("Stack component inventory does not match catalog")
+        profile, prefix = SHOP_STACKS[stack.stack_id]
+        observations = {
+            service.id: self._apply_profile_workload(
+                components[service.id],
+                reference_profile=PLUGIN_PROFILES.get(service.id) or PLATFORM_PROFILES.get(service.id) or profile,
+                api_upstream=f"{prefix}-api",
+                database_upstream=f"{prefix}-database",
+                namespace_purpose=stack.stack_id,
+                role="plugin" if service.id in PLUGIN_PROFILES else "platform" if service.id in PLATFORM_PROFILES else None,
+            )
+            for service in definition.services
+        }
+        result = StackObservation(
+            "running" if all(item.state == "running" for item in observations.values()) else "pending",
+            observations,
+        )
+        if result.state != "running":
+            raise InfrastructurePending("Shop stack has not become fully available", result)
         return result
 
     def _deploy_facilities_vendor_stack(
@@ -500,6 +549,7 @@ class KubernetesInfrastructure:
         api_upstream: str | None = None,
         database_upstream: str | None = None,
         namespace_purpose: str | None = None,
+        role: str | None = None,
     ) -> WorkloadObservation:
         template = TEMPLATES[workload.template]
         namespace = tenant_namespace(workload.tenant_id)
@@ -514,6 +564,8 @@ class KubernetesInfrastructure:
             "securecloud.io/workload": workload_label(workload.id),
             "securecloud.io/template": workload.template,
         }
+        if role:
+            labels["securecloud.io/role"] = role
         annotations = {
             "securecloud.io/workload-id": workload.id,
             "securecloud.io/tenant-id": workload.tenant_id,
@@ -528,6 +580,7 @@ class KubernetesInfrastructure:
             reference_profile,
             api_upstream=api_upstream,
             database_upstream=database_upstream,
+            role=role,
         )
         deployment = {
             "apiVersion": "apps/v1",
@@ -589,6 +642,7 @@ class KubernetesInfrastructure:
         *,
         api_upstream: str | None = None,
         database_upstream: str | None = None,
+        role: str | None = None,
     ) -> tuple[dict, dict, list[dict]]:
         security_context = {
             "allowPrivilegeEscalation": False,
@@ -645,7 +699,9 @@ class KubernetesInfrastructure:
         if workload.template == "api":
             container.update({
                 "image": (
-                    "docker.io/securecloud/reference-api:0.3.0"
+                    SHOP_IMAGE
+                    if reference_profile in SHOP_PROFILES
+                    else "docker.io/securecloud/reference-api:0.3.0"
                     if reference_profile == "facilities-vendor"
                     else "docker.io/securecloud/reference-api:0.2.0"
                 ),
@@ -663,6 +719,11 @@ class KubernetesInfrastructure:
                 "readinessProbe": {"httpGet": {"path": "/health", "port": "service"}, "initialDelaySeconds": 2, "periodSeconds": 3},
                 "livenessProbe": {"httpGet": {"path": "/health", "port": "service"}, "initialDelaySeconds": 8, "periodSeconds": 10},
             })
+            if role in {"plugin", "platform"}:  # stateless services: no database credentials
+                container["env"] = [{"name": "APP_PROFILE", "value": reference_profile},
+                                    {"name": "APP_STORAGE", "value": "memory"}]
+            elif reference_profile in {"northstar", "bloom"}:  # shop order APIs settle through the platform zone
+                container["env"].append({"name": "PLATFORM_NAMESPACE", "value": tenant_namespace(PLATFORM_TENANT_ID)})
             return container, pod_security_context, []
 
         pod_security_context.update({"runAsUser": 70, "runAsGroup": 70, "fsGroup": 70})
@@ -794,6 +855,22 @@ class KubernetesInfrastructure:
             _content_type=APPLY_CONTENT_TYPE,
         )
 
+    def set_protection(self, enabled: bool, namespaces: list[str]) -> None:
+        """Apply (enabled) or remove (disabled) every SecureCloud tenant network policy."""
+        try:
+            for namespace in namespaces:
+                if enabled:
+                    self._ensure_namespace_controls(namespace)
+                    continue
+                for policy in self._policies(namespace):
+                    try:
+                        self.networking.delete_namespaced_network_policy(policy["metadata"]["name"], namespace)
+                    except self.ApiException as exc:
+                        if exc.status != 404:
+                            raise
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
     def _ensure_namespace_controls(self, namespace: str):
         quota = {
             "apiVersion": "v1",
@@ -821,16 +898,35 @@ class KubernetesInfrastructure:
                 "egress": [{"to": [{"podSelector": {"matchLabels": {"securecloud.io/template": "api"}}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
             }),
             policy("api-from-web", {
-                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}}, "policyTypes": ["Ingress"],
+                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}, "policyTypes": ["Ingress"],
                 "ingress": [{"from": [{"podSelector": {"matchLabels": {"securecloud.io/template": "web"}}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
             }),
             policy("api-to-database", {
-                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}}, "policyTypes": ["Egress"],
+                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}, "policyTypes": ["Egress"],
                 "egress": [{"to": [{"podSelector": {"matchLabels": {"securecloud.io/template": "database"}}}], "ports": [{"protocol": "TCP", "port": 5432}]}],
             }),
             policy("database-from-api", {
                 "podSelector": {"matchLabels": {"securecloud.io/template": "database"}}, "policyTypes": ["Ingress"],
-                "ingress": [{"from": [{"podSelector": {"matchLabels": {"securecloud.io/template": "api"}}}], "ports": [{"protocol": "TCP", "port": 5432}]}],
+                "ingress": [{"from": [{"podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}}], "ports": [{"protocol": "TCP", "port": 5432}]}],
+            }),
+            policy("plugin-to-api", {
+                "podSelector": {"matchLabels": {"securecloud.io/role": "plugin"}}, "policyTypes": ["Egress"],
+                "egress": [{"to": [{"podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
+            }),
+            # Shop order APIs may call the platform zone; platform services accept only shop order APIs.
+            policy("api-to-platform", {
+                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}, "policyTypes": ["Egress"],
+                "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"securecloud.io/purpose": "platform-stack"}},
+                                    "podSelector": {"matchLabels": {"securecloud.io/role": "platform"}}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
+            }),
+            policy("platform-from-shops", {
+                "podSelector": {"matchLabels": {"securecloud.io/role": "platform"}}, "policyTypes": ["Ingress"],
+                "ingress": [{"from": [{"namespaceSelector": {"matchExpressions": [{"key": "securecloud.io/purpose", "operator": "In", "values": ["northstar-shop-stack", "bloom-shop-stack"]}]},
+                                       "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
+            }),
+            policy("api-from-plugin", {
+                "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}, "policyTypes": ["Ingress"],
+                "ingress": [{"from": [{"podSelector": {"matchLabels": {"securecloud.io/role": "plugin"}}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
             }),
         ]
 

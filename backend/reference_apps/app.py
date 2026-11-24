@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import urllib.request
 from collections.abc import Callable
 from datetime import date, datetime
 
@@ -85,7 +87,10 @@ def create_reference_app(
     @app.post("/api/resources/{resource_id}", status_code=201)
     def create_record(resource_id: str, body: dict[str, object]) -> dict[str, object]:
         resource = require_resource(resource_id)
-        return records.create(resource_id, validate_payload(resource, body)).to_dict()
+        record = records.create(resource_id, validate_payload(resource, body)).to_dict()
+        if resource_id == "orders" and os.environ.get("PLATFORM_NAMESPACE"):
+            record["platform"] = settle_with_platform(profile.id, record)
+        return record
 
     @app.put("/api/resources/{resource_id}/{record_id}")
     def update_record(
@@ -106,6 +111,30 @@ def create_reference_app(
             raise HTTPException(status_code=404, detail="Record not found")
 
     return app
+
+
+def _post(service: str, resource: str, body: dict) -> dict:
+    url = f"http://{service}.{os.environ['PLATFORM_NAMESPACE']}.svc.cluster.local:8080/api/resources/{resource}"
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read())
+
+
+def settle_with_platform(shop: str, order: dict) -> dict:
+    """Order IDs -> Payments -> Email, through the shared platform zone. Each step is reported."""
+    result: dict = {}
+    try:
+        issued = _post("order-ids", "ids", {"shop": shop, "shop_order": str(order.get("order_number", ""))})
+        result["order_id"] = f"MALL-{issued['id']:06d}"
+        _post("payments", "payments", {"order_id": result["order_id"], "shop": shop,
+                                       "amount": str(order.get("total", "0")), "status": "Captured"})
+        result["payment"] = "Captured"
+        _post("email", "emails", {"to": str(order.get("customer_email", "")),
+                                  "subject": f"Your {shop} order {result['order_id']} is confirmed"})
+        result["email"] = "Queued"
+    except Exception as exc:  # report the failing step instead of failing the order
+        result["error"] = type(exc).__name__
+    return result
 
 
 def profile_payload(profile: ProfileSpec) -> dict[str, object]:

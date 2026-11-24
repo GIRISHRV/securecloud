@@ -142,6 +142,64 @@ PROFILES: dict[str, ProfileSpec] = {
 }
 
 
+def _shop_profile(profile_id: str, name: str, description: str) -> ProfileSpec:
+    """A storefront's in-cluster order service (same shape for every shop tenant)."""
+    return ProfileSpec(
+        id=profile_id,
+        name=name,
+        description=description,
+        resources=(
+            ResourceSpec("products", "product", "Products", "Items listed in this shop.", (
+                field("sku", "SKU", max_length=30), field("name", "Product name"),
+                field("price", "Price (INR)", max_length=12),
+                field("stock", "Stock", max_length=8),
+            )),
+            ResourceSpec("orders", "order", "Orders", "Customer orders received by this shop.", (
+                field("order_number", "Order number", max_length=30),
+                field("customer_email", "Customer email", kind="email", max_length=120),
+                field("items", "Items", max_length=200), field("total", "Total (INR)", max_length=12),
+                field("status", "Status", kind="select", options=("Placed", "Packed", "Shipped", "Delivered")),
+            )),
+        ),
+    )
+
+
+PROFILES.update({
+    "northstar": _shop_profile("northstar", "Northstar", "Northstar bags and everyday carry: order service."),
+    "bloom": _shop_profile("bloom", "Bloom Candles", "Bloom hand-poured candles: storefront and orders."),
+    "shipfast": ProfileSpec(
+        id="shipfast",
+        name="ShipFast",
+        description="Third-party shipping-label plugin installed by Northstar.",
+        resources=(
+            ResourceSpec("shipments", "shipment", "Shipments", "Labels created for a shop's orders.", (
+                field("order_number", "Order number", max_length=30),
+                field("carrier", "Carrier", kind="select", options=("Delhivery", "BlueDart", "India Post")),
+                field("tracking", "Tracking number", max_length=40),
+            )),
+        ),
+    ),
+    # Platform zone: shared services both shops call when an order is placed.
+    "orderids": ProfileSpec("orderids", "Order IDs", "Issues mall-wide order numbers.", (
+        ResourceSpec("ids", "order id", "Order IDs", "One mall-wide ID per shop order.", (
+            field("shop", "Shop", max_length=30), field("shop_order", "Shop order number", max_length=30),
+        )),
+    )),
+    "payments": ProfileSpec("payments", "Payments", "Shared payment processing for every shop.", (
+        ResourceSpec("payments", "payment", "Payments", "Charges captured for shop orders.", (
+            field("order_id", "Mall order ID", max_length=30), field("shop", "Shop", max_length=30),
+            field("amount", "Amount (INR)", max_length=12),
+            field("status", "Status", kind="select", options=("Captured", "Failed")),
+        )),
+    )),
+    "email": ProfileSpec("email", "Email", "Shared transactional email for every shop.", (
+        ResourceSpec("emails", "email", "Emails", "Order confirmations queued for delivery.", (
+            field("to", "To", kind="email", max_length=120), field("subject", "Subject", max_length=120),
+        )),
+    )),
+})
+
+
 def get_profile(profile_id: str) -> ProfileSpec:
     try:
         return PROFILES[profile_id]

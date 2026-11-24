@@ -15,6 +15,7 @@ DEFAULT_TEMPORAL_MODEL = (
 
 settings = Settings(
     database=DB_PATH,
+    marketplace=os.environ.get("SECURECLOUD_MARKETPLACE", "1") != "0",
     retail_database=Path(
         os.environ.get("SECURECLOUD_RETAIL_DB", "runtime/securecloud-retail-commerce.sqlite")
     ),
