@@ -28,6 +28,8 @@ class NormalizedFlow:
     protocol: str | None
     destination_port: int | None
     node_name: str | None
+    # Hubble marks the response leg of an existing connection; it is not a new edge.
+    is_reply: bool = False
 
     @property
     def cross_tenant(self) -> bool | None:

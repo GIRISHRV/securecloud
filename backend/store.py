@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS incidents (
  source_id TEXT NOT NULL,
  source_name TEXT NOT NULL,
  tenant_id TEXT NOT NULL,
- status TEXT NOT NULL CHECK(status IN ('alert','quarantined','review','restored')),
+ status TEXT NOT NULL CHECK(status IN ('alert','quarantined','review','restored','closed')),
  reason TEXT NOT NULL,
  created_at REAL NOT NULL,
  restored_at REAL,
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS normalized_flows (
 CREATE INDEX IF NOT EXISTS normalized_flows_time ON normalized_flows(observed_at);
 CREATE TABLE IF NOT EXISTS detection_findings (
  id TEXT PRIMARY KEY,
- incident_id TEXT NOT NULL UNIQUE REFERENCES incidents(id),
+ incident_id TEXT NOT NULL REFERENCES incidents(id),
  model_version TEXT NOT NULL,
  window_start REAL NOT NULL,
  window_end REAL NOT NULL,
@@ -152,6 +152,15 @@ CREATE TABLE IF NOT EXISTS risk_observations (
  response TEXT NOT NULL CHECK(response IN ('observe','containment-recommended')),
  PRIMARY KEY(model_version,window_start,source_id,destination_id)
 );
+CREATE TABLE IF NOT EXISTS application_flow_correlations (
+ application_event_id TEXT PRIMARY KEY,
+ flow_event_id TEXT REFERENCES normalized_flows(event_id) ON DELETE SET NULL,
+ status TEXT NOT NULL CHECK(status IN ('exact','inconclusive','unmatched')),
+ reason TEXT NOT NULL,
+ correlated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS application_flow_correlations_flow
+ ON application_flow_correlations(flow_event_id);
 """
 
 
@@ -177,6 +186,33 @@ class Store:
             ):
                 if name not in finding_columns:
                     db.execute(f"ALTER TABLE detection_findings ADD COLUMN {name} {definition}")
+            # Several findings may now belong to one open incident per source; rebuild
+            # older databases whose incident_id column was UNIQUE.
+            unique_incident = any(
+                index["unique"] and [column["name"] for column in db.execute(f"PRAGMA index_info('{index['name']}')")] == ["incident_id"]
+                for index in db.execute("PRAGMA index_list(detection_findings)")
+            )
+            if unique_incident:
+                columns = ",".join(row["name"] for row in db.execute("PRAGMA table_info(detection_findings)"))
+                definition = SCHEMA.split("CREATE TABLE IF NOT EXISTS detection_findings (", 1)[1].split(");", 1)[0]
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute(f"CREATE TABLE detection_findings_new ({definition})")
+                db.execute(f"INSERT INTO detection_findings_new ({columns}) SELECT {columns} FROM detection_findings")
+                db.execute("DROP TABLE detection_findings")
+                db.execute("ALTER TABLE detection_findings_new RENAME TO detection_findings")
+                db.execute("PRAGMA foreign_keys=ON")
+            db.execute("CREATE INDEX IF NOT EXISTS detection_findings_incident_idx ON detection_findings(incident_id)")
+            # Allow the 'closed' (dismissed alert) status on databases created before it existed.
+            incident_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='incidents'").fetchone()[0]
+            if "'closed'" not in incident_sql:
+                columns = ",".join(row["name"] for row in db.execute("PRAGMA table_info(incidents)"))
+                definition = SCHEMA.split("CREATE TABLE IF NOT EXISTS incidents (", 1)[1].split(");", 1)[0]
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute(f"CREATE TABLE incidents_new ({definition})")
+                db.execute(f"INSERT INTO incidents_new ({columns}) SELECT {columns} FROM incidents")
+                db.execute("DROP TABLE incidents")
+                db.execute("ALTER TABLE incidents_new RENAME TO incidents")
+                db.execute("PRAGMA foreign_keys=ON")
 
     @contextmanager
     def connect(self):
@@ -688,6 +724,114 @@ class Store:
             for row in rows
         ]
 
+    def correlate_application_events(
+        self, application_events: list[dict], *, tolerance_seconds: float = 5.0
+    ) -> int:
+        """Link bounded application events to flows without treating time as proof.
+
+        A link is exact only when one resolved flow matches tenant, workload
+        identities, protocol, destination port, and the bounded time window.
+        Zero or multiple candidates remain explicit non-proof states.
+        """
+        if not 0.1 <= tolerance_seconds <= 30:
+            raise ValueError("Invalid correlation tolerance")
+        if len(application_events) > 1_000:
+            raise ValueError("Too many application events to correlate")
+        updated = 0
+        with self.connect() as db:
+            for event in application_events:
+                occurred_at = float(event["occurred_at"])
+                rows = db.execute(
+                    """SELECT * FROM normalized_flows
+                       WHERE identity_status='resolved'
+                         AND observed_at BETWEEN ? AND ?
+                         AND source_tenant=?
+                       ORDER BY observed_at,event_id""",
+                    (
+                        occurred_at - tolerance_seconds,
+                        occurred_at + tolerance_seconds,
+                        event["tenant_id"],
+                    ),
+                ).fetchall()
+                candidates = []
+                for row in rows:
+                    source_matches = event["source_workload"] in {
+                        row["source_workload"], row["source_name"]
+                    }
+                    destination_matches = event["destination_workload"] in {
+                        row["destination_workload"], row["destination_name"]
+                    }
+                    port_matches = (
+                        event.get("destination_port") is None
+                        or event["destination_port"] == row["destination_port"]
+                    )
+                    protocol_matches = (
+                        not event.get("protocol")
+                        or not row["protocol"]
+                        or event["protocol"].upper() == row["protocol"].upper()
+                    )
+                    if source_matches and destination_matches and port_matches and protocol_matches:
+                        candidates.append(row)
+                if len(candidates) == 1:
+                    flow_id, status, reason = (
+                        candidates[0]["event_id"],
+                        "exact",
+                        "one resolved flow matched identity, protocol, port, and time window",
+                    )
+                elif candidates:
+                    flow_id, status, reason = (
+                        None,
+                        "inconclusive",
+                        f"{len(candidates)} flows matched; timing alone cannot identify one request",
+                    )
+                else:
+                    flow_id, status, reason = (
+                        None,
+                        "unmatched",
+                        "no resolved flow matched the bounded correlation window",
+                    )
+                result = db.execute(
+                    """INSERT INTO application_flow_correlations
+                       (application_event_id,flow_event_id,status,reason,correlated_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(application_event_id) DO UPDATE SET
+                         flow_event_id=excluded.flow_event_id,status=excluded.status,
+                         reason=excluded.reason,correlated_at=excluded.correlated_at""",
+                    (event["id"], flow_id, status, reason, time.time()),
+                )
+                updated += result.rowcount
+        return updated
+
+    def application_flow_correlations(self, application_event_ids: list[str]) -> dict[str, dict]:
+        if len(application_event_ids) > 1_000:
+            raise ValueError("Too many correlation records requested")
+        if not application_event_ids:
+            return {}
+        placeholders = ",".join("?" for _ in application_event_ids)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""SELECT c.*,f.observed_at,f.source_workload,f.source_name,
+                            f.destination_workload,f.destination_name,f.verdict,
+                            f.drop_reason,f.protocol,f.destination_port
+                     FROM application_flow_correlations c
+                     LEFT JOIN normalized_flows f ON f.event_id=c.flow_event_id
+                     WHERE c.application_event_id IN ({placeholders})""",
+                application_event_ids,
+            ).fetchall()
+        return {row["application_event_id"]: dict(row) for row in rows}
+
+    def retail_security_scope(self, retail_tenant_id: str) -> set[str]:
+        """Return the explicitly deployed retail/vendor lab tenant scope."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT DISTINCT tenant_id FROM stack_deployments
+                   WHERE desired!='deleted'
+                     AND stack_id IN ('retail-stack','facilities-vendor-stack')"""
+            ).fetchall()
+        # The retail-domain tenant reference is also valid when both planes use
+        # the same stable tenant ID (for tests and future configured adapters).
+        return {retail_tenant_id, *(row["tenant_id"] for row in rows)}
+
     def get_normalized_traffic(self, limit: int = 100) -> list[dict]:
         """Project resolved Hubble flows into the portal's traffic evidence model."""
         if limit <= 0 or limit > 1_000:
@@ -773,7 +917,10 @@ class Store:
         return events
 
     def approved_edges(self) -> set[tuple[str, str]]:
-        """Return the static web-to-API and API-to-database graph edges."""
+        """Return approved intents: generic web→API and API→database template edges plus
+        every composite stack's declared service dependencies from the server catalog."""
+        from .catalog import stack_definition
+
         with self.connect() as db:
             rows = db.execute(
                 """SELECT source.id,destination.id
@@ -783,7 +930,23 @@ class Store:
                      AND ((source.template='web' AND destination.template='api')
                        OR (source.template='api' AND destination.template='database'))""",
             ).fetchall()
-        return {(row[0], row[1]) for row in rows}
+            edges = {(row[0], row[1]) for row in rows}
+            for stack in db.execute("SELECT id,stack_id FROM stack_deployments WHERE desired!='deleted'").fetchall():
+                definition = stack_definition(stack["stack_id"])
+                if definition is None:
+                    continue
+                members = {
+                    row["name"]: row["id"]
+                    for row in db.execute(
+                        "SELECT id,name FROM workloads WHERE stack_deployment_id=? AND observed='running'",
+                        (stack["id"],),
+                    )
+                }
+                for service in definition.services:
+                    for dependency in service.dependencies:
+                        if service.id in members and dependency in members:
+                            edges.add((members[service.id], members[dependency]))
+        return edges
 
     def record_detection_finding(self, finding, evidence: list[dict]) -> bool:
         """Persist one idempotent model finding and its linked incident."""
@@ -791,6 +954,27 @@ class Store:
         with self.connect() as db:
             if db.execute("SELECT 1 FROM detection_findings WHERE id=?", (finding.id,)).fetchone():
                 return False
+            flow_ids = [item["id"] for item in evidence]
+            references_by_flow: dict[str, list[str]] = {}
+            if flow_ids:
+                placeholders = ",".join("?" for _ in flow_ids)
+                links = db.execute(
+                    f"""SELECT flow_event_id,application_event_id
+                         FROM application_flow_correlations
+                         WHERE status='exact' AND flow_event_id IN ({placeholders})""",
+                    flow_ids,
+                ).fetchall()
+                for link in links:
+                    references_by_flow.setdefault(link["flow_event_id"], []).append(
+                        link["application_event_id"]
+                    )
+            incident_evidence = [
+                dict(
+                    item,
+                    applicationEventRefs=sorted(references_by_flow.get(item["id"], [])),
+                )
+                for item in evidence
+            ]
             reason = (
                 f"Unexpected graph edge scored {finding.anomaly_score:.3f} "
                 f"(threshold {finding.threshold:.3f})"
@@ -804,22 +988,50 @@ class Store:
                     f"{', '.join(key for key, value in finding.supporting_facts.items() if value)}"
                 ),
             }]
-            db.execute(
-                """INSERT INTO incidents
-                   (id,source_id,source_name,tenant_id,status,reason,created_at,evidence_json,trace_json)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    incident_id,
-                    finding.source_id,
-                    finding.source_name,
-                    finding.source_tenant,
-                    "alert",
-                    reason,
-                    finding.created_at,
-                    json.dumps(evidence),
-                    json.dumps(trace),
-                ),
-            )
+            # One open case per source workload: further findings for a workload that
+            # already has an unresolved incident are attached to it as evidence, so a
+            # multi-target attack (or attempts while quarantined) stays one incident.
+            open_incident = db.execute(
+                """SELECT id,evidence_json,trace_json FROM incidents
+                   WHERE source_id=? AND status IN ('alert','quarantined','review')
+                   ORDER BY created_at DESC LIMIT 1""",
+                (finding.source_id,),
+            ).fetchone()
+            if open_incident:
+                incident_id = open_incident["id"]
+                existing = json.loads(open_incident["evidence_json"])
+                known = {item["id"] for item in existing}
+                merged = existing + [item for item in incident_evidence if item["id"] not in known]
+                merged_trace = json.loads(open_incident["trace_json"]) + [{
+                    "at": finding.created_at,
+                    "title": "Additional anomalous edge",
+                    "detail": (
+                        f"{finding.source_name} → {next((item.get('destinationName') for item in evidence if item.get('destinationName')), finding.destination_id)} scored "
+                        f"{finding.anomaly_score:.3f} (threshold {finding.threshold:.3f}); "
+                        f"{len(merged) - len(existing)} new flow record(s) attached"
+                    ),
+                }]
+                db.execute(
+                    "UPDATE incidents SET evidence_json=?,trace_json=? WHERE id=?",
+                    (json.dumps(merged[-1000:]), json.dumps(merged_trace[-200:]), incident_id),
+                )
+            else:
+                db.execute(
+                    """INSERT INTO incidents
+                       (id,source_id,source_name,tenant_id,status,reason,created_at,evidence_json,trace_json)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        incident_id,
+                        finding.source_id,
+                        finding.source_name,
+                        finding.source_tenant,
+                        "alert",
+                        reason,
+                        finding.created_at,
+                        json.dumps(incident_evidence),
+                        json.dumps(trace),
+                    ),
+                )
             db.execute(
                 """INSERT INTO detection_findings
                    (id,incident_id,model_version,window_start,window_end,source_id,destination_id,
@@ -845,8 +1057,11 @@ class Store:
                     finding.response,
                 ),
             )
-            audit(db, f"system.detector:{finding.model_version}", finding.source_tenant, "incident.created", incident_id)
-        return True
+            audit(
+                db, f"system.detector:{finding.model_version}", finding.source_tenant,
+                "incident.updated" if open_incident else "incident.created", incident_id,
+            )
+        return not open_incident
 
     def record_risk_observations(self, observations) -> int:
         """Persist replay-safe model scores for portal history and evaluation."""
@@ -1018,11 +1233,15 @@ class Store:
                 raise ValueError("Incident not found")
             if new_status == "review" and row["status"] not in {"quarantined", "review"}:
                 raise ValueError("Only a quarantined incident can enter review")
+            if new_status == "closed" and row["status"] != "alert":
+                raise ValueError("Only an uncontained alert can be dismissed")
             traces = json.loads(row["trace_json"])
             traces.append(trace_entry)
             restored_at = trace_entry["at"] if new_status == "restored" else row["restored_at"]
             db.execute("UPDATE incidents SET status=?, restored_at=?, trace_json=? WHERE id=?",
                        (new_status, restored_at, json.dumps(traces), incident_id))
+            if new_status == "closed":
+                audit(db, actor, row["tenant_id"], "incident.dismissed", incident_id)
             
 
     def seed_demo_data(self, admin_id: str):
