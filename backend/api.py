@@ -34,6 +34,7 @@ from .infrastructure import InfrastructureUnavailable
 from .infrastructure.kubernetes import KubernetesInfrastructure
 from .lab import LabService
 from .retail import RetailStore, create_retail_router
+from .retail.accounts import AccountStore
 from .telemetry import HubbleJsonFileCollector, IdentityIndex
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 class Settings:
     database: Path
     retail_database: Path | None = None
+    marketplace: bool = False  # two shops + provider console with shared accounts
     origin: str = "https://localhost:8443"
     secure_cookie: bool = True
     session_seconds: int = 3600
@@ -120,7 +122,7 @@ class Deploy(Body):
 
 class StackDeploy(Body):
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{2,39}$")
-    stack: Literal["retail-stack", "facilities-vendor-stack"]
+    stack: Literal["retail-stack", "facilities-vendor-stack", "northstar-shop-stack", "bloom-shop-stack", "platform-stack"]
 
 
 class Lifecycle(Body):
@@ -132,6 +134,13 @@ class TrafficSimulate(Body):
     source_id: str = Field(min_length=1, max_length=100)
     destination_id: str = Field(min_length=1, max_length=100)
     port: int = Field(ge=1, le=65535)
+
+
+def _safely(function, *args):
+    try:
+        function(*args)
+    except Exception:  # pragma: no cover - startup best effort
+        logger.exception("Startup task %s failed", getattr(function, "__name__", function))
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -179,6 +188,22 @@ def create_app(settings: Settings) -> FastAPI:
     )
 
     lab_service = LabService(store, infrastructure, telemetry_status)
+    if infrastructure is not None and settings.marketplace:
+        # Background shoppers browse both storefronts (web -> order API -> database), like real
+        # traffic. The temporal model learns "normal" from these approved flows; without any
+        # benign history before an attack it has nothing to compare against.
+        def browse_loop():
+            import urllib.request
+            while True:
+                for url in ("http://127.0.0.1:8094/api/resources/products", "http://127.0.0.1:8095/api/resources/products"):
+                    try:
+                        urllib.request.urlopen(url, timeout=3).read()
+                    except Exception:
+                        pass
+                time.sleep(4)
+        threading.Thread(target=browse_loop, name="background-shoppers", daemon=True).start()
+    if infrastructure is not None:  # always start protected, even if a demo left SecureCloud off
+        threading.Thread(target=lambda: _safely(lab_service.set_protection, True), name='protect-on-start', daemon=True).start()
 
     def reconcile_loop():
         while not stop_reconciler.is_set():
@@ -193,70 +218,76 @@ def create_app(settings: Settings) -> FastAPI:
     analysis_state = {"pending": False, "last": 0.0}
 
     def telemetry_loop():
+        """Ingest Hubble flows continuously. Analysis runs in its own thread, so a slow model
+        pass never delays the flow records the lab and the console are waiting for."""
         while not stop_reconciler.is_set():
             try:
                 batch = collector.poll()
                 inserted = store.ingest_normalized_flows(list(batch.flows))
-                new_findings = 0
-                # Ingest every second, but run graph analysis at most every 3 s so the
-                # model does not starve the API threads of the interpreter lock.
                 analysis_state["pending"] = analysis_state["pending"] or bool(inserted)
-                due = time.time() - analysis_state["last"] >= 3.0
-                if analysis_state["pending"] and due:
-                    analysis_state.update(pending=False, last=time.time())
-                    recent_flows = store.get_normalized_flows(limit=100_000)
-                    if recent_flows:
-                        application_events = retail_store.events(
-                            limit=1_000,
-                            start=recent_flows[0].observed_at - 5,
-                            end=recent_flows[-1].observed_at + 5,
-                        )
-                        store.correlate_application_events(application_events)
-                    if recent_flows:
-                        analysis_cutoff = recent_flows[-1].observed_at - 300
-                        recent_flows = [
-                            flow
-                            for flow in recent_flows
-                            if flow.observed_at >= analysis_cutoff
-                        ]
-                    arguments = [
-                        recent_flows,
-                        store.approved_edges(),
-                    ]
-                    if isinstance(graph_detector, TemporalGraphDetectionPipeline):
-                        arguments.append([
-                            WorkloadDescriptor(**item)
-                            for item in store.detection_workloads()
-                        ])
-                    findings = graph_detector.analyze(*arguments)
-                    if isinstance(graph_detector, TemporalGraphDetectionPipeline):
-                        store.record_risk_observations(graph_detector.last_observations)
-                    evidence_by_id = {
-                        event["id"]: event
-                        for event in store.get_normalized_traffic(limit=1_000)
-                    }
-                    for finding in findings:
-                        evidence = [
-                            evidence_by_id[event_id]
-                            for event_id in finding.event_ids
-                            if event_id in evidence_by_id
-                        ]
-                        if evidence and store.record_detection_finding(finding, evidence):
-                            new_findings += 1
                 telemetry_status.update(
                     accepted=telemetry_status["accepted"] + inserted,
                     rejected=telemetry_status["rejected"] + batch.rejected_count,
                     last_poll=time.time(),
                     last_error=None,
-                    findings=telemetry_status["findings"] + new_findings,
                 )
             except Exception as exc:
-                telemetry_status.update(
-                    last_poll=time.time(),
-                    last_error=type(exc).__name__,
-                )
+                telemetry_status.update(last_poll=time.time(), last_error=type(exc).__name__)
                 logger.warning("Hubble telemetry poll failed: %s", type(exc).__name__)
-            stop_reconciler.wait(1.0)
+            stop_reconciler.wait(0.25)
+
+    def analysis_loop():
+        """Score the recent graph at most every 3 s; detection pauses while SecureCloud is off."""
+        while not stop_reconciler.is_set():
+            stop_reconciler.wait(0.5)
+            if not (analysis_state["pending"] and time.time() - analysis_state["last"] >= 3.0 and lab_service.protection):
+                continue
+            analysis_state.update(pending=False, last=time.time())
+            new_findings = 0
+            try:
+                # Only the analysis window is needed: a time-bounded query, not the newest 100k rows.
+                recent_flows = store.get_normalized_flows(start=time.time() - 330, limit=100_000)
+                if recent_flows:
+                    application_events = retail_store.events(
+                        limit=1_000,
+                        start=recent_flows[0].observed_at - 5,
+                        end=recent_flows[-1].observed_at + 5,
+                    )
+                    store.correlate_application_events(application_events)
+                if recent_flows:
+                    analysis_cutoff = recent_flows[-1].observed_at - 300
+                    recent_flows = [
+                        flow
+                        for flow in recent_flows
+                        if flow.observed_at >= analysis_cutoff
+                    ]
+                arguments = [
+                    recent_flows,
+                    store.approved_edges(),
+                ]
+                if isinstance(graph_detector, TemporalGraphDetectionPipeline):
+                    arguments.append([
+                        WorkloadDescriptor(**item)
+                        for item in store.detection_workloads()
+                    ])
+                findings = graph_detector.analyze(*arguments)
+                if isinstance(graph_detector, TemporalGraphDetectionPipeline):
+                    store.record_risk_observations(graph_detector.last_observations)
+                evidence_by_id = {
+                    event["id"]: event
+                    for event in store.get_normalized_traffic(limit=1_000, window_seconds=600)
+                }
+                for finding in findings:
+                    evidence = [
+                        evidence_by_id[event_id]
+                        for event_id in finding.event_ids
+                        if event_id in evidence_by_id
+                    ]
+                    if evidence and store.record_detection_finding(finding, evidence):
+                        new_findings += 1
+                telemetry_status.update(findings=telemetry_status["findings"] + new_findings)
+            except Exception:
+                logger.exception("Graph analysis failed")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -270,13 +301,10 @@ def create_app(settings: Settings) -> FastAPI:
                 ),
             )
         if collector is not None:
-            threads.append(
-                threading.Thread(
-                    target=telemetry_loop,
-                    name="securecloud-telemetry",
-                    daemon=True,
-                ),
-            )
+            threads.extend([
+                threading.Thread(target=telemetry_loop, name="securecloud-telemetry", daemon=True),
+                threading.Thread(target=analysis_loop, name="securecloud-analysis", daemon=True),
+            ])
         application.state.background_threads = threads
         for thread in threads:
             thread.start()
@@ -353,15 +381,20 @@ def create_app(settings: Settings) -> FastAPI:
     def generic(request, exc):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
-    app.include_router(
-        create_retail_router(
-            retail_store,
-            secure_cookie=settings.secure_cookie,
-            session_seconds=settings.session_seconds,
-            correlation_store=store,
-            lab=lab_service,
-        )
-    )
+    common = dict(secure_cookie=settings.secure_cookie, session_seconds=settings.session_seconds,
+                  correlation_store=store, lab=lab_service)
+    if settings.marketplace:
+        accounts = AccountStore(retail_database.with_name(f"{retail_database.stem}-accounts.sqlite"))
+        bloom_store = RetailStore(retail_database.with_name(f"{retail_database.stem}-bloom.sqlite"), order_prefix="BL", tenant_id="bloom")
+        app.state.accounts, app.state.bloom_store = accounts, bloom_store
+        app.include_router(create_retail_router(retail_store, accounts=accounts, shop_id="northstar", prefix="/api/retail",
+                                                mode="shop", mirror_upstream="http://127.0.0.1:8094", **common))
+        app.include_router(create_retail_router(bloom_store, accounts=accounts, shop_id="bloom", prefix="/api/bloom",
+                                                mode="shop", mirror_upstream="http://127.0.0.1:8095", **common))
+        app.include_router(create_retail_router(retail_store, accounts=accounts, shop_id="securecloud", prefix="/api/provider",
+                                                mode="provider", **common))
+    else:
+        app.include_router(create_retail_router(retail_store, **common))
 
     def session(request: Request, mutate: bool = False):
         token = request.cookies.get(cookie)
@@ -506,7 +539,7 @@ def create_app(settings: Settings) -> FastAPI:
         session(request)
         deployable: set[str] = set()
         if infrastructure is not None:
-            deployable.add("facilities-vendor-stack")
+            deployable.update({"facilities-vendor-stack", "northstar-shop-stack", "bloom-shop-stack", "platform-stack"})
             if settings.retail_manifest is not None:
                 deployable.add("retail-stack")
         return catalog_response(frozenset(deployable))
@@ -1002,11 +1035,11 @@ def create_app(settings: Settings) -> FastAPI:
                         if r["id"] == "hospital-web" and r["observed"] == "running"
                         else "http://127.0.0.1:8094/"
                         if r["stack_deployment_id"] is not None
-                        and r["name"] == "frontend"
+                        and r["name"] in ("frontend", "northstar-web")
                         and r["observed"] == "running"
                         else "http://127.0.0.1:8095/"
                         if r["stack_deployment_id"] is not None
-                        and r["name"] == "vendor-web"
+                        and r["name"] in ("vendor-web", "bloom-web")
                         and r["observed"] == "running"
                         else None
                     ),

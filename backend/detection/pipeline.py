@@ -102,8 +102,14 @@ class EdgeFrequencyDetectionPipeline:
             source_destinations: dict[str, set[str]] = {}
             source_ports: dict[str, set[int]] = {}
             for edge in snapshot.edges:
-                source_destinations.setdefault(edge.source_id, set()).add(edge.destination_id)
-                source_ports.setdefault(edge.source_id, set()).update(edge.destination_ports)
+                source_destinations.setdefault(edge.source_id, set())
+                source_ports.setdefault(edge.source_id, set())
+                # Fan-out evidence counts only unapproved or denied edges: calling several
+                # approved services (e.g. the shared platform) is normal, not scanning.
+                if (edge.source_id, edge.destination_id) in approved_edges and not edge.denied_count:
+                    continue
+                source_destinations[edge.source_id].add(edge.destination_id)
+                source_ports[edge.source_id].update(edge.destination_ports)
             score_by_edge = {
                 (score.source_id, score.destination_id): score
                 for score in baseline.score(snapshot)
@@ -257,8 +263,14 @@ class TemporalGraphDetectionPipeline:
             source_destinations: dict[str, set[str]] = {}
             source_ports: dict[str, set[int]] = {}
             for edge in snapshot.edges:
-                source_destinations.setdefault(edge.source_id, set()).add(edge.destination_id)
-                source_ports.setdefault(edge.source_id, set()).update(edge.destination_ports)
+                source_destinations.setdefault(edge.source_id, set())
+                source_ports.setdefault(edge.source_id, set())
+                # Fan-out evidence counts only unapproved or denied edges: calling several
+                # approved services (e.g. the shared platform) is normal, not scanning.
+                if (edge.source_id, edge.destination_id) in approved_edges and not edge.denied_count:
+                    continue
+                source_destinations[edge.source_id].add(edge.destination_id)
+                source_ports[edge.source_id].update(edge.destination_ports)
             scores, hidden = engine.score(snapshot, hidden)
             baseline_by_edge = {
                 (score.source_id, score.destination_id): score
