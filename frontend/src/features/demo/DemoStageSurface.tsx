@@ -23,7 +23,7 @@ function IncidentStages({ status }: { status: Incident["status"] }) {
       {stages.map((stage, index) => (
         <span
           key={stage}
-          className={stages.indexOf(status) >= index ? "reached" : ""}
+          className={(stages as readonly string[]).indexOf(status) >= index ? "reached" : ""}
         >
           <b>{index + 1}</b>
           {stage}
