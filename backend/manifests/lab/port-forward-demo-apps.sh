@@ -22,9 +22,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-forward_forever "$retail_namespace" frontend 8094:80 &
+forward_forever "$retail_namespace" "${3:-frontend}" 8094:80 &
 retail_pid=$!
-forward_forever "$vendor_namespace" vendor-web 8095:80 &
+forward_forever "$vendor_namespace" "${4:-vendor-web}" 8095:80 &
 vendor_pid=$!
 
 wait "$retail_pid" "$vendor_pid"

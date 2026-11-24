@@ -198,7 +198,10 @@ try {
     } else { Write-Event 'REUSE' 'Hubble Relay already listening on port 4245' DarkGreen }
 
     if ((Test-Path $Hubble) -and (Test-LoopbackPort 4245)) {
-        $captureFresh = (Test-Path $HubbleExport) -and (((Get-Date) - (Get-Item $HubbleExport).LastWriteTime).TotalSeconds -lt 5)
+        # Reuse only a capture process that is actually alive; a recently written file alone can
+        # belong to a capture that has just exited, which would leave telemetry silently stopped.
+        $captureAlive = [bool](Get-Process -Name 'hubble' -ErrorAction SilentlyContinue)
+        $captureFresh = $captureAlive -and (Test-Path $HubbleExport) -and (((Get-Date) - (Get-Item $HubbleExport).LastWriteTime).TotalSeconds -lt 5)
         if (-not $captureFresh) {
             Start-LoggedProcess -Name 'hubble-capture' -FilePath $Hubble `
                 -Arguments @('observe','--server','127.0.0.1:4245','--follow','--output','json') `
@@ -207,15 +210,15 @@ try {
         } else { Write-Event 'REUSE' 'live Hubble capture is already updating' DarkGreen }
     }
 
-    $retailNamespace = Invoke-Wsl "k3s kubectl get namespace -l securecloud.io/purpose=retail-stack -o jsonpath='{.items[0].metadata.name}'"
-    $vendorNamespace = Invoke-Wsl "k3s kubectl get namespace -l securecloud.io/purpose=facilities-vendor-stack -o jsonpath='{.items[0].metadata.name}'"
+    $retailNamespace = Invoke-Wsl "k3s kubectl get namespace -l securecloud.io/purpose=northstar-shop-stack -o jsonpath='{.items[0].metadata.name}'"
+    $vendorNamespace = Invoke-Wsl "k3s kubectl get namespace -l securecloud.io/purpose=bloom-shop-stack -o jsonpath='{.items[0].metadata.name}'"
     if ($retailNamespace -and $vendorNamespace -and (-not (Test-LoopbackPort 8094) -or -not (Test-LoopbackPort 8095))) {
         $drive = $ProjectRoot.Substring(0, 1).ToLowerInvariant()
         $linuxTail = $ProjectRoot.Substring(2).Replace('\', '/')
         $linuxRoot = "/mnt/$drive$linuxTail"
         $forwardScript = "$linuxRoot/backend/manifests/lab/port-forward-demo-apps.sh"
         Start-LoggedProcess -Name 'demo-apps' -FilePath 'wsl.exe' `
-            -Arguments @('-d','Ubuntu','-u','root','--',$forwardScript,$retailNamespace,$vendorNamespace) | Out-Null
+            -Arguments @('-d','Ubuntu','-u','root','--',$forwardScript,$retailNamespace,$vendorNamespace,'northstar-web','bloom-web') | Out-Null
     } else {
         $retailLabel = if ($retailNamespace) { $retailNamespace } else { 'not deployed' }
         $vendorLabel = if ($vendorNamespace) { $vendorNamespace } else { 'not deployed' }
