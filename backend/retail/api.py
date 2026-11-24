@@ -8,9 +8,11 @@ from typing import Literal
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
+from .mirror import mirror_in_background, mirror_order
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from .accounts import local_profile
 from .store import RetailError, RetailStore
 
 
@@ -77,6 +79,10 @@ class OrderStatus(Body):
     status: Literal["placed", "processing", "packing", "shipped", "delivered", "cancelled"]
 
 
+class LabProtection(Body):
+    enabled: bool
+
+
 class LabRunRequest(Body):
     scenario_id: str = Field(min_length=3, max_length=60, pattern=r"^[a-z0-9-]+$")
 
@@ -85,8 +91,20 @@ def create_retail_router(
     store: RetailStore, *, secure_cookie: bool, session_seconds: int,
     correlation_store=None,
     lab=None,
+    accounts=None,
+    shop_id: str = "northstar",
+    prefix: str = "/api/retail",
+    mode: str = "all",
+    mirror_upstream: str | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/retail", tags=["retail"])
+    """One shop's API (mode="shop"), the provider console (mode="provider"), or both (legacy "all").
+
+    With ``accounts`` set, sign-in uses the shared account store: one login works on every
+    shop, and roles are granted per shop (owner) or for the provider console (provider).
+    """
+    router = APIRouter(prefix=prefix, tags=[f"{shop_id}-{mode}"])
+    accounts = accounts or store
+    shared = accounts is not store
     hasher = PasswordHasher()
     dummy_hash = hasher.hash(secrets.token_urlsafe(32))
     cookie = "__Host-retail" if secure_cookie else "retail_dev"
@@ -98,9 +116,19 @@ def create_retail_router(
             **{key: user[key] for key in ("tenant_id", "email", "display_name", "phone", "role", "status") if key in user},
         }
 
+    def resolve(token):
+        row = accounts.resolve_session(token) if token else None
+        if not row or not shared:
+            return row
+        granted = accounts.role(row["user_id"], shop_id)
+        role = "owner" if granted == ("provider" if mode == "provider" else "owner") else "customer"
+        if mode == "provider":
+            return dict(row, role=role, tenant_id=shop_id)
+        return dict(row, user_id=local_profile(store, row, role), role=role, tenant_id=store.tenant_id)
+
     def session(request: Request, mutate=False, owner=False):
         token = request.cookies.get(cookie)
-        row = store.resolve_session(token) if token else None
+        row = resolve(token)
         if not row:
             raise HTTPException(401, "Sign in to access the retail application")
         if mutate and not secrets.compare_digest(request.headers.get("x-csrf-token", ""), row["csrf"]):
@@ -140,7 +168,7 @@ def create_retail_router(
     @router.post("/auth/register", status_code=201)
     def register(body: Registration):
         try:
-            return {"user": public_user(store.create_user(body.email, body.password, body.display_name, phone=body.phone))}
+            return {"user": public_user(accounts.create_user(body.email, body.password, body.display_name, phone=body.phone))}
         except sqlite3.IntegrityError:
             raise HTTPException(409, "An account with that email already exists")
         except RetailError as exc:
@@ -152,7 +180,7 @@ def create_retail_router(
         recent = [stamp for stamp in attempts.get(key, []) if stamp >= now - 60]
         if len(recent) >= 8:
             raise HTTPException(429, "Too many sign-in attempts; try again later")
-        record = store.authentication_record(body.email)
+        record = accounts.authentication_record(body.email)
         try:
             valid = hasher.verify(record["password_digest"] if record else dummy_hash, body.password)
         except VerificationError:
@@ -164,9 +192,9 @@ def create_retail_router(
             attempts[key] = recent
             raise HTTPException(401, "Invalid email or password")
         attempts.pop(key, None)
-        token, csrf, session_id = store.create_session(record["id"], session_seconds, request.headers.get("user-agent", "")[:160])
+        token, csrf, session_id = accounts.create_session(record["id"], session_seconds, request.headers.get("user-agent", "")[:160])
         response.set_cookie(cookie, token, httponly=True, secure=secure_cookie, samesite="strict", max_age=session_seconds, path="/")
-        return {"user": public_user(record), "csrf": csrf, "session_id": session_id}
+        return {"user": public_user(resolve(token)), "csrf": csrf, "session_id": session_id}
 
     @router.get("/auth/session")
     def read_session(request: Request):
@@ -176,7 +204,7 @@ def create_retail_router(
     @router.post("/auth/logout", status_code=204)
     def logout(request: Request, response: Response):
         user = session(request, mutate=True)
-        store.revoke_session(user["token_digest"])
+        accounts.revoke_session(user["token_digest"])
         response.delete_cookie(cookie, path="/", secure=secure_cookie, httponly=True, samesite="strict")
 
     @router.get("/products")
@@ -221,11 +249,13 @@ def create_retail_router(
         user = session(request, mutate=True)
         address = body.model_dump()
         try:
-            return store.checkout(
+            order = store.checkout(
                 user, address, request_key(request), trusted_request_id(request), user["id"]
             )
         except RetailError as exc:
             raise HTTPException(409, str(exc))
+        mirror_in_background(order, mirror_upstream)
+        return order
 
     @router.get("/orders")
     def orders(request: Request):
@@ -361,13 +391,17 @@ def create_retail_router(
                 containment=correlation_store.get_containment_request(incident["id"]),
             ))
         recorded = correlation_store.get_traffic(limit=200)
-        live = correlation_store.get_normalized_traffic(limit=200)
-        return {
-            "applicationEvents": enriched_events,
-            "incidents": incidents,
-            "risk": [item for item in correlation_store.risk_observations() if item["tenantId"] in scope],
-            "traffic": [item for item in [*recorded, *live] if item["sourceTenant"] in scope][-200:],
-        }
+        live = correlation_store.get_normalized_traffic(limit=200, window_seconds=900)
+        risk = [item for item in correlation_store.risk_observations() if item["tenantId"] in scope]
+        traffic = [item for item in [*recorded, *live] if item["sourceTenant"] in scope][-200:]
+        if mode == "provider" and lab is not None:  # show only the current demo session
+            since = lab.session_start
+            def last_activity(item):  # new evidence can attach to an incident opened before this session
+                return max([item["createdAt"], *(e.get("at", 0) for e in item["evidence"]), *(t.get("at", 0) for t in item["trace"])])
+            incidents = [i for i in incidents if last_activity(i) >= since or i["status"] in ("quarantined", "review")]
+            risk = [r for r in risk if r["windowEnd"] >= since]
+            traffic = [t for t in traffic if t["at"] >= since]
+        return {"applicationEvents": enriched_events, "incidents": incidents, "risk": risk, "traffic": traffic}
 
     @router.post("/admin/security/incidents/{incident_id}/quarantine")
     def owner_quarantine(incident_id: str, request: Request):
@@ -442,10 +476,51 @@ def create_retail_router(
             raise HTTPException(503, result["error"] or "Restore has not been verified")
         return {"status": "restored", "verified": True}
 
+    if lab is not None and mode != "provider" and shop_id == "northstar":  # the lab drives Northstar orders only
+        def lab_order(email="customer@test.com"):
+            """Place one real Northstar order for the lab and send it through the cluster."""
+            account = store.authentication_record(email)
+            if not account:
+                raise RetailError("The lab customer account does not exist; run the retail seed")
+            user = dict(store.user(account["id"]), user_id=account["id"])
+            product = next((p for p in store.products() if p["stock_quantity"] > 0), None)
+            if product is None:
+                raise RetailError("No product is in stock")
+            store.set_cart_item(user["user_id"], product["id"], 1)
+            address = {"recipient": user["display_name"], "line1": "1 Lab Street", "line2": "", "city": "Bengaluru",
+                       "state": "Karnataka", "postal_code": "560001", "phone": user.get("phone") or "9999999999"}
+            order = store.checkout(user, address, "lab-" + secrets.token_hex(8), "lab-" + secrets.token_hex(6), user["user_id"])
+            return order, mirror_order(order, upstream=mirror_upstream)
+        lab.order_hook = lab_order
+
     def require_lab():
         if lab is None:
             raise HTTPException(503, "The live lab is not configured")
         return lab
+
+    @router.post("/admin/lab/reset")
+    def lab_reset(request: Request):
+        owner = session(request, mutate=True, owner=True)
+        # Close open, uncontained alerts so the next attack opens a fresh incident; recorded in each trace.
+        if correlation_store is not None:
+            for incident in correlation_store.get_incidents():
+                if incident["status"] == "alert" and incident["tenantId"] in security_scope(owner):
+                    correlation_store.update_incident_status(
+                        incident["id"], "closed",
+                        {"at": time.time(), "title": "Closed by demo reset",
+                         "detail": "The provider started a new demo session; this alert had no containment."},
+                        actor=owner["user_id"],
+                    )
+        return require_lab().reset()
+
+    @router.post("/admin/lab/protection")
+    def lab_protection(body: LabProtection, request: Request):
+        session(request, mutate=True, owner=True)
+        from backend.lab import LabUnavailable
+        try:
+            return require_lab().set_protection(body.enabled)
+        except LabUnavailable as exc:
+            raise HTTPException(409, str(exc))
 
     @router.get("/admin/lab/status")
     def lab_status(request: Request):
@@ -487,4 +562,39 @@ def create_retail_router(
         items = store.seed_catalog()
         return {"items": items, "sample_orders": store.seed_sample_history()}
 
+    @router.get("/admin/platform/services")
+    def platform_services(request: Request):
+        """Provider view: every shop, shared platform service and plugin, and what each may call."""
+        session(request, owner=True)
+        if correlation_store is None:
+            raise HTTPException(503, "Security plane unavailable")
+        from backend.catalog import PLATFORM_PROFILES, PLUGIN_PROFILES, stack_definition
+        with correlation_store.connect() as db:
+            rows = db.execute(
+                """SELECT w.id,w.name,w.template,w.observed,w.quarantined,s.stack_id,t.name AS tenant
+                   FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id JOIN tenants t ON t.id=w.tenant_id
+                   WHERE s.desired!='deleted' AND w.observed!='deleted'
+                     AND s.stack_id IN ('northstar-shop-stack','bloom-shop-stack','platform-stack')
+                   ORDER BY s.stack_id,w.name"""
+            ).fetchall()
+        platform = [row["name"] for row in rows if row["stack_id"] == "platform-stack"]
+        items = []
+        for row in rows:
+            definition = stack_definition(row["stack_id"])
+            service = next((svc for svc in definition.services if svc.id == row["name"]), None)
+            calls = list(service.dependencies) if service else []
+            if row["name"].endswith("-api") and row["name"] not in PLUGIN_PROFILES and row["stack_id"] != "platform-stack":
+                calls += platform
+            items.append({
+                "id": row["id"], "name": row["name"], "tenant": row["tenant"], "stack": row["stack_id"],
+                "kind": "plugin" if row["name"] in PLUGIN_PROFILES else "platform" if row["name"] in PLATFORM_PROFILES else "shop",
+                "status": row["observed"], "quarantined": bool(row["quarantined"]), "calls": calls,
+            })
+        return {"items": items}
+
+    provider_paths = (f"{prefix}/admin/security", f"{prefix}/admin/lab", f"{prefix}/admin/platform")
+    if mode == "shop":
+        router.routes[:] = [r for r in router.routes if not r.path.startswith(provider_paths)]
+    elif mode == "provider":
+        router.routes[:] = [r for r in router.routes if r.path.startswith(provider_paths + (f"{prefix}/auth",))]
     return router

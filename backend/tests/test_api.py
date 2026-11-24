@@ -60,9 +60,9 @@ def test_authenticated_catalog_exposes_only_bounded_definitions(lab):
         "web", "api", "database",
     ]
     assert [item["id"] for item in payload["stacks"]] == [
-        "retail-stack", "facilities-vendor-stack",
+        "retail-stack", "facilities-vendor-stack", "northstar-shop-stack", "bloom-shop-stack", "platform-stack",
     ]
-    retail, vendor = payload["stacks"]
+    retail, vendor = payload["stacks"][:2]
     assert retail["status"] == "validated"
     assert retail["deployment_enabled"] is False
     assert len(retail["services"]) == 12

@@ -821,19 +821,22 @@ class Store:
         return {row["application_event_id"]: dict(row) for row in rows}
 
     def retail_security_scope(self, retail_tenant_id: str) -> set[str]:
-        """Return the explicitly deployed retail/vendor lab tenant scope."""
+        """Return the explicitly deployed lab tenant scope (shops and legacy retail/vendor)."""
         with self.connect() as db:
             rows = db.execute(
                 """SELECT DISTINCT tenant_id FROM stack_deployments
                    WHERE desired!='deleted'
-                     AND stack_id IN ('retail-stack','facilities-vendor-stack')"""
+                     AND stack_id IN ('retail-stack','facilities-vendor-stack','northstar-shop-stack','bloom-shop-stack','platform-stack')"""
             ).fetchall()
         # The retail-domain tenant reference is also valid when both planes use
         # the same stable tenant ID (for tests and future configured adapters).
         return {retail_tenant_id, *(row["tenant_id"] for row in rows)}
 
-    def get_normalized_traffic(self, limit: int = 100) -> list[dict]:
-        """Project resolved Hubble flows into the portal's traffic evidence model."""
+    def get_normalized_traffic(self, limit: int = 100, window_seconds: float | None = None) -> list[dict]:
+        """Project recent resolved Hubble flows into the portal's traffic evidence model.
+
+        Live callers pass ``window_seconds`` so only recent flows are ranked: the flow table holds
+        millions of rows, and ranking all of them made every security view wait about a second."""
         if limit <= 0 or limit > 1_000:
             raise ValueError("Invalid telemetry query limit")
         with self.connect() as db:
@@ -850,7 +853,8 @@ class Store:
                      FROM normalized_flows
                      JOIN workloads source ON source.id=normalized_flows.source_workload
                      JOIN workloads destination ON destination.id=normalized_flows.destination_workload
-                     WHERE identity_status='resolved'
+                     WHERE observed_at>=?
+                       AND identity_status='resolved'
                        AND verdict IN ('forwarded','dropped')
                        AND (
                          verdict='dropped'
@@ -868,7 +872,7 @@ class Store:
                    )
                    SELECT * FROM ranked WHERE connection_rank=1
                    ORDER BY observed_at DESC,event_id DESC LIMIT ?""",
-                (limit,),
+                (time.time() - window_seconds if window_seconds else 0, limit),
             ).fetchall()
         events = []
         seen_connections: set[tuple] = set()
@@ -919,18 +923,19 @@ class Store:
     def approved_edges(self) -> set[tuple[str, str]]:
         """Return approved intents: generic web→API and API→database template edges plus
         every composite stack's declared service dependencies from the server catalog."""
-        from .catalog import stack_definition
+        from .catalog import PLUGIN_PROFILES, stack_definition
 
         with self.connect() as db:
             rows = db.execute(
-                """SELECT source.id,destination.id
+                """SELECT source.id,destination.id,source.name,destination.name
                    FROM workloads source
                    JOIN workloads destination ON destination.tenant_id=source.tenant_id
                    WHERE source.observed='running' AND destination.observed='running'
                      AND ((source.template='web' AND destination.template='api')
                        OR (source.template='api' AND destination.template='database'))""",
             ).fetchall()
-            edges = {(row[0], row[1]) for row in rows}
+            # Plugins get only their declared catalog intents, never the generic template edges.
+            edges = {(row[0], row[1]) for row in rows if row[2] not in PLUGIN_PROFILES and row[3] not in PLUGIN_PROFILES}
             for stack in db.execute("SELECT id,stack_id FROM stack_deployments WHERE desired!='deleted'").fetchall():
                 definition = stack_definition(stack["stack_id"])
                 if definition is None:
@@ -946,6 +951,15 @@ class Store:
                     for dependency in service.dependencies:
                         if service.id in members and dependency in members:
                             edges.add((members[service.id], members[dependency]))
+            # Every shop's order API may call the shared platform services.
+            platform = [row["id"] for row in db.execute(
+                """SELECT w.id FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id
+                   WHERE s.stack_id='platform-stack' AND s.desired!='deleted' AND w.observed='running'""")]
+            for row in db.execute(
+                """SELECT w.id FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id
+                   WHERE s.stack_id IN ('northstar-shop-stack','bloom-shop-stack') AND s.desired!='deleted'
+                     AND w.observed='running' AND w.name LIKE '%-api'"""):
+                edges.update((row["id"], target) for target in platform)
         return edges
 
     def record_detection_finding(self, finding, evidence: list[dict]) -> bool:

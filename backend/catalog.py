@@ -105,7 +105,60 @@ STACK_DEFINITIONS = (
             StackService("vendor-database", "database", 5432),
         ),
     ),
+    StackDefinition(
+        id="northstar-shop-stack",
+        name="Northstar shop",
+        description="Northstar storefront order pipeline with the ShipFast plugin installed.",
+        version="securecloud-shop-v1",
+        status="validated",
+        deployment_enabled=False,
+        workflow="Orders placed on the Northstar storefront flow web → order API → database.",
+        services=(
+            StackService("northstar-web", "web", 80, ("northstar-api",)),
+            StackService("northstar-api", "api", 8080, ("northstar-database",)),
+            StackService("northstar-database", "database", 5432),
+            # Third-party plugin: may call the shop's order API and nothing else.
+            StackService("shipfast-plugin", "api", 8080, ("northstar-api",)),
+        ),
+    ),
+    StackDefinition(
+        id="bloom-shop-stack",
+        name="Bloom shop",
+        description="Bloom candle storefront, order API and database.",
+        version="securecloud-shop-v1",
+        status="validated",
+        deployment_enabled=False,
+        workflow="Browse Bloom products and record orders.",
+        services=(
+            StackService("bloom-web", "web", 80, ("bloom-api",)),
+            StackService("bloom-api", "api", 8080, ("bloom-database",)),
+            StackService("bloom-database", "database", 5432),
+        ),
+    ),
 )
+
+PLATFORM_STACK = StackDefinition(
+    id="platform-stack",
+    name="Mall platform services",
+    description="Shared order IDs, payments and email, run by the platform team for every shop.",
+    version="securecloud-platform-v1",
+    status="validated",
+    deployment_enabled=False,
+    workflow="Shop order APIs call these services when an order is placed.",
+    services=(
+        StackService("order-ids", "api", 8080),
+        StackService("payments", "api", 8080),
+        StackService("email", "api", 8080),
+    ),
+)
+STACK_DEFINITIONS = STACK_DEFINITIONS + (PLATFORM_STACK,)
+
+# Profile-based stacks: stack id -> (app profile, workload prefix).
+SHOP_STACKS = {"northstar-shop-stack": ("northstar", "northstar"), "bloom-shop-stack": ("bloom", "bloom"),
+               "platform-stack": (None, None)}
+PLUGIN_PROFILES = {"shipfast-plugin": "shipfast"}
+PLATFORM_PROFILES = {"order-ids": "orderids", "payments": "payments", "email": "email"}
+PLATFORM_TENANT_ID = "securecloud-platform"  # platform-owned zone, not a customer tenant
 
 
 def catalog_response(deployable_stack_ids: frozenset[str] = frozenset()) -> dict:

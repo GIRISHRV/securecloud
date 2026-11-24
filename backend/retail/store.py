@@ -94,8 +94,9 @@ class RetailError(ValueError):
 class RetailStore:
     """Transactional local adapter shaped for a later PostgreSQL implementation."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, order_prefix: str = "NS", tenant_id: str = "retailco"):
         self.path = Path(path)
+        self.order_prefix, self.tenant_id = order_prefix, tenant_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.hasher = PasswordHasher()
         with self.connect() as db:
@@ -204,9 +205,9 @@ class RetailStore:
         with self.connect() as db:
             db.execute("UPDATE retail_sessions SET revoked_at=? WHERE token_digest=?", (time.time(), token_digest))
 
-    def seed_catalog(self):
+    def seed_catalog(self, rows=None):
         now = time.time()
-        rows = [
+        rows = rows or [
             ("prod-backpack", "NS-BAG-014", "Everyday Backpack", "Durable backpack with a padded laptop sleeve.", 149900, 32, "/products/backpack.webp"),
             ("prod-bottle", "NS-ACC-031", "Stainless Water Bottle", "Insulated 750 ml stainless-steel bottle.", 65000, 58, "/products/bottle.webp"),
             ("prod-sunglasses", "NS-ACC-008", "Classic Sunglasses", "UV-protected everyday sunglasses.", 70000, 17, "/products/sunglasses.webp"),
@@ -281,7 +282,7 @@ class RetailStore:
                     updated_at = min(now, created_at + rng.uniform(0.2, 2.5) * 86400) if status != "placed" else created_at
                     db.execute(
                         "INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (order_id, "NS-" + secrets.token_hex(4).upper(), person["id"], "retailco", status,
+                        (order_id, f"{self.order_prefix}-" + secrets.token_hex(4).upper(), person["id"], self.tenant_id, status,
                          "refunded" if status == "cancelled" else "paid", subtotal, subtotal, "INR",
                          json.dumps(customer), json.dumps(address), created_at, updated_at),
                     )
@@ -436,7 +437,7 @@ class RetailStore:
                 if not item["published"] or item["quantity"] > item["stock_quantity"]:
                     raise RetailError(f"{item['name']} is no longer available in that quantity")
             subtotal, order_id = sum(x["price_minor"] * x["quantity"] for x in items), str(uuid.uuid4())
-            order_number = "NS-" + secrets.token_hex(4).upper()
+            order_number = f"{self.order_prefix}-" + secrets.token_hex(4).upper()
             customer = {"id": user["user_id"], "name": user["display_name"], "email": user["email"], "phone": user["phone"]}
             db.execute(
                 "INSERT INTO customer_addresses VALUES(?,?,?,?,?,?,?,?,?,?)",
