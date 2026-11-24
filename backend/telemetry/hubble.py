@@ -152,6 +152,7 @@ def normalize_hubble_flow(
         protocol=protocol,
         destination_port=destination_port,
         node_name=node_name,
+        is_reply=flow.get("is_reply") is True,
     )
 
 

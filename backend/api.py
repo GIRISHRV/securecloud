@@ -32,6 +32,8 @@ from .detection import (
 from .detection.temporal_graph import WorkloadDescriptor
 from .infrastructure import InfrastructureUnavailable
 from .infrastructure.kubernetes import KubernetesInfrastructure
+from .lab import LabService
+from .retail import RetailStore, create_retail_router
 from .telemetry import HubbleJsonFileCollector, IdentityIndex
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Settings:
     database: Path
+    retail_database: Path | None = None
     origin: str = "https://localhost:8443"
     secure_cookie: bool = True
     session_seconds: int = 3600
@@ -142,6 +145,10 @@ def create_app(settings: Settings) -> FastAPI:
         else None
     )
     store = Store(settings.database, infrastructure=infrastructure)
+    retail_database = settings.retail_database or settings.database.with_name(
+        f"{settings.database.stem}-retail{settings.database.suffix or '.sqlite'}"
+    )
+    retail_store = RetailStore(retail_database)
     detector = DenialBurstBaseline(window_seconds=60.0, denial_threshold=3)
     graph_detector = (
         TemporalGraphDetectionPipeline(settings.temporal_model)
@@ -171,6 +178,8 @@ def create_app(settings: Settings) -> FastAPI:
         else None
     )
 
+    lab_service = LabService(store, infrastructure, telemetry_status)
+
     def reconcile_loop():
         while not stop_reconciler.is_set():
             try:
@@ -181,14 +190,28 @@ def create_app(settings: Settings) -> FastAPI:
                 logger.exception("Infrastructure reconciliation iteration failed")
             stop_reconciler.wait(2.0)
 
+    analysis_state = {"pending": False, "last": 0.0}
+
     def telemetry_loop():
         while not stop_reconciler.is_set():
             try:
                 batch = collector.poll()
                 inserted = store.ingest_normalized_flows(list(batch.flows))
                 new_findings = 0
-                if inserted:
+                # Ingest every second, but run graph analysis at most every 3 s so the
+                # model does not starve the API threads of the interpreter lock.
+                analysis_state["pending"] = analysis_state["pending"] or bool(inserted)
+                due = time.time() - analysis_state["last"] >= 3.0
+                if analysis_state["pending"] and due:
+                    analysis_state.update(pending=False, last=time.time())
                     recent_flows = store.get_normalized_flows(limit=100_000)
+                    if recent_flows:
+                        application_events = retail_store.events(
+                            limit=1_000,
+                            start=recent_flows[0].observed_at - 5,
+                            end=recent_flows[-1].observed_at + 5,
+                        )
+                        store.correlate_application_events(application_events)
                     if recent_flows:
                         analysis_cutoff = recent_flows[-1].observed_at - 300
                         recent_flows = [
@@ -272,6 +295,7 @@ def create_app(settings: Settings) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.store = store
+    app.state.retail_store = retail_store
     app.state.detector = detector
     app.state.graph_detector = graph_detector
     app.state.settings = settings
@@ -284,6 +308,22 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.middleware("http")
     async def boundaries(request, call_next):
+        # Caller-provided identity/correlation headers are never trusted. The
+        # monolith creates a fresh request ID and passes identity internally
+        # from its authenticated server-side session.
+        blocked = {
+            b"x-request-id",
+            b"x-securecloud-tenant",
+            b"x-securecloud-actor-ref",
+            b"x-securecloud-session-ref",
+        }
+        request_id = str(uuid.uuid4())
+        request.scope["headers"] = [
+            (name, value)
+            for name, value in request.scope["headers"]
+            if name.lower() not in blocked
+        ] + [(b"x-request-id", request_id.encode("ascii"))]
+        request.state.request_id = request_id
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             if request.headers.get("origin") != settings.origin.rstrip("/"):
                 return JSONResponse({"detail": "Untrusted request origin"}, status_code=403)
@@ -301,6 +341,7 @@ def create_app(settings: Settings) -> FastAPI:
             "Content-Security-Policy": "default-src 'self'",
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
+            "X-Request-ID": request_id,
         })
         return response
 
@@ -311,6 +352,16 @@ def create_app(settings: Settings) -> FastAPI:
     @app.exception_handler(HTTPException)
     def generic(request, exc):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+    app.include_router(
+        create_retail_router(
+            retail_store,
+            secure_cookie=settings.secure_cookie,
+            session_seconds=settings.session_seconds,
+            correlation_store=store,
+            lab=lab_service,
+        )
+    )
 
     def session(request: Request, mutate: bool = False):
         token = request.cookies.get(cookie)
