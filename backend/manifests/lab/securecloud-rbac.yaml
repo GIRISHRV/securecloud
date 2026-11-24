@@ -37,6 +37,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "events"]
     verbs: ["get", "list", "watch"]
+  # Live lab harness only: runs server-built, allowlisted probe scripts inside
+  # project-owned lab workloads (backend/lab). Remove for non-lab deployments.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]

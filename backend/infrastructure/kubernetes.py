@@ -95,6 +95,51 @@ class KubernetesInfrastructure:
         except Exception as exc:
             raise self._translate(exc) from exc
 
+    def _running_pod(self, namespace: str, workload_id: str):
+        try:
+            pods = self.core.list_namespaced_pod(
+                namespace,
+                label_selector=f"securecloud.io/workload={workload_label(workload_id)}",
+                field_selector="status.phase=Running",
+            ).items
+        except Exception as exc:
+            raise self._translate(exc) from exc
+        ready = [
+            pod for pod in pods
+            if pod.metadata.deletion_timestamp is None
+            and all(status.ready for status in (pod.status.container_statuses or []))
+        ]
+        if not ready:
+            raise InfrastructureUnavailable("No ready pod for the selected lab workload")
+        return ready[0]
+
+    def workload_pod_ip(self, namespace: str, workload_id: str) -> str:
+        pod = self._running_pod(namespace, workload_id)
+        if not pod.status.pod_ip:
+            raise InfrastructureUnavailable("Lab workload pod has no IP yet")
+        return pod.status.pod_ip
+
+    def exec_in_workload(self, namespace: str, workload_id: str, argv: list[str], timeout: float = 90.0) -> str:
+        """Run a server-built lab command in a workload's first container (lab harness only)."""
+        from kubernetes.stream import stream
+
+        pod = self._running_pod(namespace, workload_id)
+        try:
+            return stream(
+                self.core.connect_get_namespaced_pod_exec,
+                pod.metadata.name,
+                namespace,
+                container=pod.spec.containers[0].name,
+                command=argv,
+                stderr=False,
+                stdin=False,
+                stdout=True,
+                tty=False,
+                _request_timeout=timeout,
+            )
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
     def reconcile(self, action: str, workload: WorkloadRequest) -> WorkloadObservation:
         try:
             if action == "deploy":
@@ -403,7 +448,19 @@ class KubernetesInfrastructure:
             },
             "spec": {
                 "endpointSelector": {"matchLabels": labels},
-                "ingressDeny": [{"fromEntities": ["all"]}],
+                # Deny every pod in every namespace and everything outside the node.
+                # Deny rules win over allow rules, so "all" would also block the
+                # kubelet's health probes and crash-loop the quarantined workload,
+                # destroying its runtime state. Only the local node's host identity
+                # (kubelet liveness/readiness probes) may still connect inbound. kube-apiserver
+                # is not denied by entity: on single-node K3s it shares the host identity.
+                "ingressDeny": [
+                    {"fromEndpoints": [{"matchExpressions": [
+                        {"key": "k8s:io.kubernetes.pod.namespace", "operator": "Exists"},
+                    ]}]},
+                    {"fromEntities": ["world", "remote-node", "ingress", "init", "unmanaged"]},
+                ],
+                "ingress": [{"fromEntities": ["host"]}],
                 "egressDeny": [{"toEntities": ["all"]}],
             },
         }
