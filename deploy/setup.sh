@@ -101,6 +101,10 @@ for role, user in (("PROVIDER", "provider"), ("NORTHSTAR_OWNER", "northstar"), (
     print(f"{role}={user}@{domain}:{secrets.token_urlsafe(18)}")
 PY
 fi
+if ! grep -q '^GUEST=' "${ETC}/demo-accounts.env"; then
+  # Public reviewer login, shown on the home page on purpose: it cannot remove, pause or reconfigure shops.
+  echo "GUEST=guest@${DOMAIN}:$(python3 -c 'import secrets; print(secrets.token_urlsafe(13))')" >> "${ETC}/demo-accounts.env"
+fi
 chmod 0640 "${ETC}/demo-accounts.env" && chgrp securecloud "${ETC}/demo-accounts.env"
 cat > "${ETC}/securecloud.env" <<EOF
 SECURECLOUD_DB=${DATA}/securecloud.sqlite
@@ -113,6 +117,7 @@ SECURECLOUD_KUBECONFIG=${DATA}/securecloud.kubeconfig
 SECURECLOUD_HUBBLE_EXPORT=${DATA}/hubble-current.jsonl
 SECURECLOUD_SHOP_QUOTA=5
 SECURECLOUD_FLOW_RETENTION_SECONDS=86400
+SECURECLOUD_GUEST_LOGIN=$(sed -n 's/^GUEST=//p' "${ETC}/demo-accounts.env")
 EOF
 chmod 0640 "${ETC}/securecloud.env" && chgrp securecloud "${ETC}/securecloud.env"
 

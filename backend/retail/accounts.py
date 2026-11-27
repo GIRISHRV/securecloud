@@ -12,7 +12,7 @@ from .store import RetailStore
 ROLES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS shop_roles(
  user_id TEXT NOT NULL REFERENCES retail_users(id) ON DELETE CASCADE,
- shop TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN('owner','provider')),
+ shop TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN('owner','provider','guest')),
  PRIMARY KEY(user_id, shop));
 CREATE TABLE IF NOT EXISTS shop_staff(
  user_id TEXT NOT NULL REFERENCES retail_users(id) ON DELETE CASCADE,
@@ -26,6 +26,16 @@ class AccountStore(RetailStore):
         super().__init__(path)
         with self.connect() as db:
             db.executescript(ROLES_SCHEMA)
+            table = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='shop_roles'").fetchone()[0]
+            if "'guest'" not in table:  # older databases: widen the role check to allow the public guest reviewer
+                db.executescript("""
+                    ALTER TABLE shop_roles RENAME TO shop_roles_old;
+                    CREATE TABLE shop_roles(
+                     user_id TEXT NOT NULL REFERENCES retail_users(id) ON DELETE CASCADE,
+                     shop TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN('owner','provider','guest')),
+                     PRIMARY KEY(user_id, shop));
+                    INSERT INTO shop_roles SELECT user_id, shop, role FROM shop_roles_old;
+                    DROP TABLE shop_roles_old;""")
 
     def role(self, user_id: str, shop: str) -> str:
         """owner/provider from shop_roles; invited staff manage the shop like its owner (except the team)."""

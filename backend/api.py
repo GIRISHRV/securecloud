@@ -547,6 +547,8 @@ def create_app(settings: Settings) -> FastAPI:
         @app.post("/api/mall/shops", status_code=202)
         def mall_create(body: ShopCreate, request: Request):
             account = merchant(request, mutate=True)
+            if accounts.role(account["user_id"], "securecloud") == "guest":
+                raise HTTPException(403, "The shared guest account cannot open shops; register your own account to try it")
             if infrastructure is None:
                 raise HTTPException(503, "Shop provisioning needs the Kubernetes lab")
             try:
@@ -557,9 +559,23 @@ def create_app(settings: Settings) -> FastAPI:
 
         def provider(request: Request, mutate: bool = False) -> dict:
             account = merchant(request, mutate)
-            if accounts.role(account["user_id"], "securecloud") != "provider":
-                raise HTTPException(403, "Provider access required")
+            role = accounts.role(account["user_id"], "securecloud")
+            if role == "guest" and not mutate:
+                return account  # public reviewer: may look at everything in the console
+            if role != "provider":
+                raise HTTPException(403, "The public guest account can look and run the lab, but cannot change shops"
+                                    if role == "guest" else "Provider access required")
             return account
+
+        guest_login = os.environ.get("SECURECLOUD_GUEST_LOGIN", "")
+
+        @app.get("/api/mall/guest")
+        def mall_guest():
+            """Public reviewer login, published on purpose: it cannot remove, pause or reconfigure shops."""
+            email, _, password = guest_login.partition(":")
+            if not email or not password:
+                raise HTTPException(404, "No public guest account on this server")
+            return {"email": email, "password": password}
 
         class ShopRemoval(Body):
             confirm: str = Field(min_length=1, max_length=24)

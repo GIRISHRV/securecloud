@@ -143,7 +143,10 @@ def create_retail_router(
         if not row or not shared:
             return row
         granted = accounts.role(row["user_id"], shop_id)
-        role = "owner" if granted == ("provider" if mode == "provider" else "owner") else "customer"
+        # The public guest reviewer may use the provider console's demo actions (lab, containment);
+        # backend/api.py refuses it anything that changes shops.
+        allowed = ("provider", "guest") if mode == "provider" else ("owner",)
+        role = "owner" if granted in allowed else "customer"
         if mode == "provider":
             return dict(row, role=role, tenant_id=shop_id)
         return dict(row, user_id=local_profile(store, row, role), role=role, tenant_id=store.tenant_id)

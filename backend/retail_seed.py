@@ -27,6 +27,7 @@ ROLES = {
     "NORTHSTAR_OWNER": ("Northstar Owner", "northstar", "owner"),
     "BLOOM_OWNER": ("Bloom Owner", "bloom", "owner"),
     "PROVIDER": ("SecureCloud Provider", "securecloud", "provider"),
+    "GUEST": ("Guest Reviewer", "securecloud", "guest"),  # public demo login; see backend/api.py provider()
     "OWNER": ("Northstar Owner", "northstar", "owner"),  # older single-shop files
 }
 

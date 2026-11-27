@@ -198,3 +198,48 @@ def test_uploads_and_image_paths_are_validated(tmp_path):
         assert maya.post("/api/shops/terra-pots/admin/products", json={**product, "image_path": bad}).status_code == 422
     assert maya.post("/api/shops/terra-pots/admin/products", json={**product, "image_path": "/products/lamp.webp"}).status_code == 201
     assert TestClient(app).get("/api/shops/terra-pots/media/../../secret.webp").status_code == 404
+
+
+def test_public_guest_can_look_and_use_the_console_but_never_change_shops(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECURECLOUD_GUEST_LOGIN", "guest@example.com:published-on-purpose")
+    app, password, users = make_mall(tmp_path)
+    app.state.shops.create({"user_id": users["maya@example.com"]["id"]}, request())
+    guest_user = app.state.accounts.create_user("guest@example.com", password, "Guest Reviewer")
+    app.state.accounts.grant(guest_user["id"], "securecloud", "guest")
+    guest = signed_in(app, "guest@example.com", password)
+
+    assert TestClient(app).get("/api/mall/guest").json() == {"email": "guest@example.com", "password": "published-on-purpose"}
+    console = guest.post("/api/provider/auth/login", json={"email": "guest@example.com", "password": password}).json()
+    assert console["user"]["role"] == "owner"  # the provider console admits the guest
+    guest.headers["X-CSRF-Token"] = console["csrf"]
+    assert guest.get("/api/provider/admin/shops").status_code == 200           # sees every shop
+    assert guest.get("/api/provider/admin/platform/services").status_code != 403  # console views open
+    for path, body in (("terra-pots/remove", {"confirm": "terra-pots"}), ("terra-pots/mode", {"mode": "protect"}),
+                       ("terra-pots/pause", {"confirm": "terra-pots"}), ("terra-pots/resume", {"confirm": "terra-pots"})):
+        refused = guest.post(f"/api/provider/admin/shops/{path}", json=body)
+        assert refused.status_code == 403 and "guest" in refused.json()["detail"], path
+    assert guest.post("/api/mall/shops", json={}).status_code in (403, 422)
+    assert app.state.shops.get("terra-pots")["status"] == "active"
+
+
+def test_guest_login_endpoint_is_absent_unless_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("SECURECLOUD_GUEST_LOGIN", raising=False)
+    app, _, _ = make_mall(tmp_path)
+    assert TestClient(app).get("/api/mall/guest").status_code == 404
+
+
+def test_older_account_databases_are_migrated_to_allow_the_guest_role(tmp_path):
+    import sqlite3
+    from backend.retail.accounts import AccountStore
+    path = tmp_path / "accounts.sqlite"
+    store = AccountStore(path)
+    user = store.create_user("old@example.com", secrets.token_urlsafe(18), "Old Provider")
+    store.grant(user["id"], "securecloud", "provider")
+    with sqlite3.connect(path) as db:  # rebuild the table the way older releases created it
+        db.executescript("""ALTER TABLE shop_roles RENAME TO t; CREATE TABLE shop_roles(user_id TEXT NOT NULL, shop TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN('owner','provider')), PRIMARY KEY(user_id, shop));
+            INSERT INTO shop_roles SELECT * FROM t; DROP TABLE t;""")
+    migrated = AccountStore(path)
+    assert migrated.role(user["id"], "securecloud") == "provider"  # existing grants kept
+    migrated.grant(user["id"], "reviewers", "guest")
+    assert migrated.role(user["id"], "reviewers") == "guest"
