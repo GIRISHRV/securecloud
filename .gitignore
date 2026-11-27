@@ -15,3 +15,6 @@ backend/data/raw/
 backend/data/processed/
 backend/models/*.pt
 backend/results/raw/
+
+# College/review materials stay local (never published)
+collegedocs/

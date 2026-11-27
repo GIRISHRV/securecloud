@@ -21,7 +21,9 @@ apt-get update -q
 apt-get install -y -q git curl ca-certificates
 
 if [[ -d "${APP}/.git" ]]; then
-  git -C "${APP}" pull --ff-only
+  # The server copy has no local edits; follow GitHub exactly, even if history was rewritten.
+  git -C "${APP}" fetch --force origin main
+  git -C "${APP}" reset --hard origin/main
 else
   git clone "${REPO}" "${APP}"
 fi
