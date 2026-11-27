@@ -356,3 +356,9 @@
 .sf-card-error { color: var(--sf-bad); font-size: .8rem; }
 .sf-pay-button { width: 100%; min-height: 52px; border-radius: var(--sf-radius-sm); background: var(--sf-accent); color: #fff; font-size: 1rem; font-weight: 600; }
 .sf-pay-button:hover:not(:disabled) { background: var(--sf-accent-hover); }
+
+/* Shop themes from the template (navy is the default above). */
+.sf[data-theme="forest"] { --sf-accent: #1f5135; --sf-accent-hover: #163b27; --sf-accent-soft: #e4f0e8; }
+.sf[data-theme="plum"] { --sf-accent: #5b2a6e; --sf-accent-hover: #451f54; --sf-accent-soft: #f1e7f5; }
+.sf[data-theme="sunset"] { --sf-accent: #a13d12; --sf-accent-hover: #7c2e0d; --sf-accent-soft: #fbeae0; }
+.sf[data-theme="graphite"] { --sf-accent: #2b2f36; --sf-accent-hover: #1c1f24; --sf-accent-soft: #eceef1; }

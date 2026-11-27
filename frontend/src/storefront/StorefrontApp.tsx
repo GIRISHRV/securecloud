@@ -49,7 +49,7 @@ function Storefront() {
   const activeCategory = route.name === "home" ? route.category : undefined;
 
   return (
-    <div className="sf">
+    <div className="sf" data-theme={SHOP.theme}>
       <a className="sf-skip" href="#sf-content">Skip to content</a>
       <div className="sf-announce">
         <span>Free delivery on every order</span>

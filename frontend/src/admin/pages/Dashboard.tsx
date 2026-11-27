@@ -12,7 +12,7 @@ const RANGES = [7, 14, 30] as const;
 
 export function Dashboard({ data, navigate, refresh, onLoadSample, loadingSample }: {
   data: AdminSnapshot; navigate: (page: AdminPage, id?: string) => void; refresh: () => Promise<void>;
-  onLoadSample: () => Promise<void>; loadingSample: boolean;
+  onLoadSample?: () => Promise<void>; loadingSample: boolean;  // only testbed shops have sample data
 }) {
   const [range, setRange] = useState<(typeof RANGES)[number]>(14);
   const series = useMemo(() => dailySeries(data.orders, range), [data.orders, range]);
@@ -47,12 +47,17 @@ export function Dashboard({ data, navigate, refresh, onLoadSample, loadingSample
         </button>
       )}
 
+      {!SHOP.fixed && <Onboarding data={data} navigate={navigate} />}
       {data.orders.length === 0 && (
         <Panel className="ad-onboarding">
           <div>
             <Database size={22} aria-hidden="true" />
-            <div><strong>No orders yet</strong><p>Place an order in the storefront, or load the labelled sample catalogue and 30 days of sample orders to explore the dashboard.</p></div>
-            <button className="ad-button ad-button-primary" disabled={loadingSample} onClick={() => void onLoadSample()}>{loadingSample ? "Loading…" : "Load sample data"}</button>
+            <div><strong>No orders yet</strong><p>{onLoadSample
+              ? "Place an order in the storefront, or load the labelled sample catalogue and 30 days of sample orders to explore the dashboard."
+              : "Add your products, then share your storefront. Orders show up here as customers buy."}</p></div>
+            {onLoadSample
+              ? <button className="ad-button ad-button-primary" disabled={loadingSample} onClick={() => void onLoadSample()}>{loadingSample ? "Loading…" : "Load sample data"}</button>
+              : <button className="ad-button ad-button-primary" onClick={() => navigate("products")}>Add products</button>}
           </div>
         </Panel>
       )}
@@ -166,5 +171,29 @@ function Kpi({ label, value, change, trend, footnote }: { label: string; value: 
       </span>
       {trend && <Sparkline values={trend} />}
     </div>
+  );
+}
+
+
+/* Getting started, for shops made from the template. Each step ticks itself from real data. */
+function Onboarding({ data, navigate }: { data: AdminSnapshot; navigate: (page: AdminPage, id?: string) => void }) {
+  const link = `${window.location.origin}${SHOP.base}/shop`;
+  const [copied, setCopied] = useState(() => { try { return localStorage.getItem(`shared:${SHOP.id}`) === "1"; } catch { return false; } });
+  const steps = [
+    { title: "Add your first product", done: data.products.length > 0, action: () => navigate("products") },
+    { title: "Give a product a photo", done: data.products.some((product) => product.image_path.includes("/media/")), action: () => navigate("products") },
+    { title: "Share your shop link", done: copied, action: () => { void navigator.clipboard?.writeText(link); setCopied(true); try { localStorage.setItem(`shared:${SHOP.id}`, "1"); } catch { /* private mode */ } } },
+    { title: "Get your first order", done: data.orders.length > 0, action: () => window.open(`${SHOP.base}/shop`, "_blank", "noreferrer") },
+  ];
+  const done = steps.filter((step) => step.done).length;
+  if (done === steps.length) return null;
+  return (
+    <Panel title="Get your shop going" subtitle={`${done} of ${steps.length} done`}>
+      <ol className="ad-onboard">{steps.map((step, index) => (
+        <li key={step.title} className={step.done ? "done" : ""}>
+          <b>{step.done ? "✓" : index + 1}</b><span>{step.title}</span>
+          {!step.done && <button className="ad-button" onClick={step.action}>{index === 2 ? "Copy link" : "Go"}</button>}
+        </li>))}</ol>
+    </Panel>
   );
 }

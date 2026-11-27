@@ -4,12 +4,13 @@ import type { AdminService, AdminSnapshot, Product } from "../adminService";
 import { topProducts } from "../analytics";
 import { Drawer, Empty, FilterInput, money, PageHead, Panel, Status } from "../ui";
 import { errorText, useToaster } from "../toast";
+import { SHOP } from "../../shop";
 
 const IMAGES = ["", "/products/backpack.webp", "/products/bottle.webp", "/products/lamp.webp", "/products/sunglasses.webp"];
 
 export function Products({ data, service, query, setQuery, refresh, onLoadSample, loadingSample }: {
   data: AdminSnapshot; service: AdminService; query: string; setQuery: (value: string) => void; refresh: () => Promise<void>;
-  onLoadSample: () => Promise<void>; loadingSample: boolean;
+  onLoadSample?: () => Promise<void>; loadingSample: boolean;  // only testbed shops have sample data
 }) {
   const [busy, setBusy] = useState("");
   const toaster = useToaster();
@@ -37,7 +38,7 @@ export function Products({ data, service, query, setQuery, refresh, onLoadSample
   return (
     <>
       <PageHead title="Products" description="Catalogue, pricing and inventory shown in the storefront.">
-        <button className="ad-button" disabled={loadingSample} onClick={() => void onLoadSample()}>{loadingSample ? "Loading…" : "Load sample data"}</button>
+        {onLoadSample && <button className="ad-button" disabled={loadingSample} onClick={() => void onLoadSample()}>{loadingSample ? "Loading…" : "Load sample data"}</button>}
         <button className="ad-button ad-button-primary" onClick={() => setCreating(true)}><Plus size={15} />Add product</button>
       </PageHead>
       <div className="ad-kpis ad-kpis-compact">
@@ -56,8 +57,11 @@ export function Products({ data, service, query, setQuery, refresh, onLoadSample
                   sold={sales.get(product.id)?.units ?? 0} revenue={sales.get(product.id)?.revenue ?? 0} />
               ))}</tbody>
             </table></div>
-          : <Empty title="No products yet" action={<button className="ad-button ad-button-primary" onClick={() => void onLoadSample()}>Load sample data</button>}>
-              Load the sample catalogue or add your first product.</Empty>}
+          : onLoadSample
+            ? <Empty title="No products yet" action={<button className="ad-button ad-button-primary" onClick={() => void onLoadSample()}>Load sample data</button>}>
+                Load the sample catalogue or add your first product.</Empty>
+            : <Empty title="No products yet" action={<button className="ad-button ad-button-primary" onClick={() => setCreating(true)}><Plus size={15} />Add your first product</button>}>
+                Add a product with a photo and it appears in your storefront.</Empty>}
       </Panel>
       <Drawer open={creating} onClose={() => setCreating(false)} title="Add product" subtitle="New products appear in the storefront when published.">
         <NewProduct service={service} onDone={async () => { setCreating(false); await refresh(); }} />
@@ -113,12 +117,25 @@ function NewProduct({ service, onDone }: { service: AdminService; onDone: () => 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [image, setImage] = useState("");
+  const [uploaded, setUploaded] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    setUploading(true); setError("");
+    try {
+      const path = await service.uploadImage(file);
+      setUploaded((items) => [path, ...items.filter((item) => item !== path)]);
+      setImage(path);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not upload the image"); }
+    finally { setUploading(false); }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
     try {
       await service.createProduct({
-        sku: String(form.get("sku")).toUpperCase(), name: String(form.get("name")), description: String(form.get("description")),
+        // The storefront reads a product's category from the SKU's middle segment (XX-CODE-123).
+        sku: `${SHOP.id.replace(/-/g, "").slice(0, 2).toUpperCase()}-${String(form.get("category"))}-${String(Date.now() % 100000).padStart(5, "0")}`, name: String(form.get("name")), description: String(form.get("description")),
         price_minor: Math.round(Number(form.get("price")) * 100), stock_quantity: Number(form.get("stock")),
         published: form.get("published") === "on", image_path: image,
       });
@@ -130,7 +147,9 @@ function NewProduct({ service, onDone }: { service: AdminService; onDone: () => 
   return (
     <form className="ad-form" onSubmit={(event) => void submit(event)}>
       <label>Name<input name="name" required minLength={2} maxLength={120} /></label>
-      <label>SKU<input name="sku" required pattern="[A-Za-z0-9][A-Za-z0-9\-]{2,39}" placeholder="NS-ACC-040" /><small>Use NS-BAG, NS-ACC or NS-HOM to choose the storefront category.</small></label>
+      <label>Category<select name="category" required defaultValue={Object.keys(SHOP.categoryByCode)[0]}>
+        {Object.entries(SHOP.categoryByCode).map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+      </select><small>Where it appears in your storefront.</small></label>
       <label>Description<textarea name="description" required minLength={2} maxLength={500} rows={3} /></label>
       <div className="ad-form-row">
         <label>Price (₹)<input name="price" type="number" min="0" step="1" required /></label>
@@ -138,7 +157,11 @@ function NewProduct({ service, onDone }: { service: AdminService; onDone: () => 
       </div>
       <fieldset className="ad-image-picker">
         <legend>Image</legend>
-        {IMAGES.map((src) => (
+        <label className={`ad-image-upload ${uploading ? "busy" : ""}`}>
+          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} disabled={uploading} />
+          <span>{uploading ? "Uploading…" : "+ Upload"}</span>
+        </label>
+        {[...uploaded, ...IMAGES].map((src) => (
           <button type="button" key={src || "none"} className={image === src ? "active" : ""} onClick={() => setImage(src)} aria-pressed={image === src} aria-label={src ? src.split("/").pop() : "No image"}>
             {src ? <img src={src} alt="" /> : <span>None</span>}
           </button>

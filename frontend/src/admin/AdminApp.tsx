@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Activity, Database, ExternalLink, FlaskConical, LayoutDashboard, Menu, Package, ShieldAlert, ShieldCheck, ShoppingBag, User, Users, X } from "lucide-react";
+import { Activity, BellRing, Boxes, Database, ExternalLink, FlaskConical, LayoutDashboard, Menu, Network, Package, ShieldCheck, ShoppingBag, Settings2, Store, User, Users, X } from "lucide-react";
 import ActionSearchBar, { type CommandItem } from "../components/kokonutui/action-search-bar";
 import Loader from "../components/kokonutui/loader";
 import ProfileDropdown from "../components/kokonutui/profile-dropdown";
@@ -11,28 +11,37 @@ import { Orders } from "./pages/Orders";
 import { Customers } from "./pages/Customers";
 import { Products } from "./pages/Products";
 import { Security } from "./pages/Security";
-import { Services } from "./pages/Services";
 import { Lab } from "./pages/Lab";
+import { Settings } from "./pages/Settings";
+import { Alerts, Policies, Shops, TrafficPage, usePlatformServices, Workloads } from "./pages/Console";
 import "./admin.css";
-import { ADMIN_BASE, IS_PROVIDER, SHOP } from "../shop";
+import { ADMIN_BASE, IS_LAB, IS_PROVIDER, SHOP } from "../shop";
 
-const BRAND = IS_PROVIDER
+const BRAND = IS_LAB
+  ? { initial: "S", name: "SecureCloud", tagline: "Attack testbed" }
+  : IS_PROVIDER
   ? { initial: "S", name: "SecureCloud", tagline: "Provider console" }
   : { initial: SHOP.initial, name: SHOP.name, tagline: "Store administration" };
 const STOREFRONT = `${SHOP.base}/shop`;
 
-export type AdminPage = "overview" | "orders" | "customers" | "products" | "lab" | "security" | "services";
+export type AdminPage = "overview" | "orders" | "customers" | "products" | "settings" | "security" | "alerts" | "shops" | "traffic" | "workloads" | "policies" | "lab";
 
-const ALL_PAGES: Array<{ id: AdminPage; label: string; icon: typeof LayoutDashboard; group: "Store" | "SecureCloud" }> = [
+const ALL_PAGES: Array<{ id: AdminPage; label: string; icon: typeof LayoutDashboard; group: "Store" | "SecureCloud" | "Testbed" }> = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, group: "Store" },
   { id: "orders", label: "Orders", icon: ShoppingBag, group: "Store" },
   { id: "customers", label: "Customers", icon: Users, group: "Store" },
   { id: "products", label: "Products", icon: Package, group: "Store" },
-  { id: "lab", label: "Live lab", icon: FlaskConical, group: "SecureCloud" },
-  { id: "security", label: "Security activity", icon: ShieldAlert, group: "SecureCloud" },
-  { id: "services", label: "Shared services & plugins", icon: Activity, group: "SecureCloud" },
+  { id: "settings", label: "Settings", icon: Settings2, group: "Store" },
+  { id: "security", label: "Overview", icon: ShieldCheck, group: "SecureCloud" },
+  { id: "alerts", label: "Alerts", icon: BellRing, group: "SecureCloud" },
+  { id: "shops", label: "Shops", icon: Store, group: "SecureCloud" },
+  { id: "traffic", label: "Traffic", icon: Activity, group: "SecureCloud" },
+  { id: "workloads", label: "Workloads", icon: Boxes, group: "SecureCloud" },
+  { id: "policies", label: "Network policy", icon: Network, group: "SecureCloud" },
+  { id: "lab", label: "Attack scenarios", icon: FlaskConical, group: "Testbed" },
 ];
-const PAGES = ALL_PAGES.filter((item) => (item.group === "SecureCloud") === IS_PROVIDER);
+const SURFACE_GROUP = IS_LAB ? "Testbed" : IS_PROVIDER ? "SecureCloud" : "Store";
+const PAGES = ALL_PAGES.filter((item) => item.group === SURFACE_GROUP);
 
 function locationState(): { page: AdminPage; id: string | null } {
   const [first, second] = window.location.pathname.slice(ADMIN_BASE.length).replace(/^\//, "").split("/");
@@ -72,8 +81,8 @@ function OwnerLogin({ service, initialError, onSuccess }: { service: AdminServic
     <main className="ad-login">
       <section className="ad-login-card">
         <div className="ad-brand ad-brand-dark"><span className="ad-brand-mark">{BRAND.initial}</span><span><strong>{BRAND.name}</strong><small>{BRAND.tagline}</small></span></div>
-        <h1>{IS_PROVIDER ? "Sign in to the provider console" : "Sign in to your store"}</h1>
-        <p>{IS_PROVIDER ? "Service map, live lab, incidents, shared services and plugins for every shop on the platform." : "Orders, customers and products for your shop. One SecureCloud Mall account works everywhere."}</p>
+        <h1>{IS_LAB ? "Sign in to the attack testbed" : IS_PROVIDER ? "Sign in to the provider console" : "Sign in to your store"}</h1>
+        <p>{IS_LAB ? "Launch synthetic attacks inside the isolated lab and watch SecureCloud respond. Uses your provider account." : IS_PROVIDER ? "Live map, alerts and containment for every shop on the platform." : "Orders, customers and products for your shop. One SecureCloud Mall account works everywhere."}</p>
         <form className="ad-form" onSubmit={(event) => void submit(event)}>
           <label>Email<input name="email" type="email" required autoComplete="email" /></label>
           <label>Password<input name="password" type="password" required autoComplete="current-password" /></label>
@@ -107,6 +116,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
   const [query, setQuery] = useState("");
   const [loadingSample, setLoadingSample] = useState(false);
   const toaster = usePromiseToast();
+  const services = usePlatformServices(service, IS_PROVIDER && !IS_LAB);
 
   const refresh = useCallback(async () => {
     setLoading(true); setError("");
@@ -128,7 +138,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
       void service.securitySummary()
         .then((security) => { if (active) setData((current) => current ? { ...current, security } : current); })
         .catch(() => undefined);
-    }, page === "security" ? 5_000 : 20_000);
+    }, ["security", "alerts", "traffic", "workloads", "policies"].includes(page) ? 5_000 : 20_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [data !== null, page, service]);
 
@@ -171,7 +181,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
         children: data.customers.map((customer) => ({ id: `customer:${customer.display_name}`, label: customer.display_name, keywords: [customer.email] })) },
       { id: "group:products", label: "Find a product", group: "Search", icon: <Package size={16} />, placeholder: "Name or SKU",
         children: data.products.map((product) => ({ id: `product:${product.name}`, label: product.name, keywords: [product.sku] })) },
-      { id: "action:sample", label: "Load sample data", group: "Actions", icon: <Database size={16} /> },
+      ...(SHOP.fixed && !IS_PROVIDER ? [{ id: "action:sample", label: "Load sample data", group: "Actions", icon: <Database size={16} /> }] : []),
       ...(IS_PROVIDER ? [] : [{ id: "action:storefront", label: "Open storefront", group: "Actions", icon: <ExternalLink size={16} />, href: STOREFRONT }]),
     ];
   }, [data]);
@@ -191,17 +201,17 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
     <div className="ad-app">
       <aside className={`ad-sidebar ${menu ? "open" : ""}`}>
         <a className="ad-brand" href={ADMIN_BASE}><span className="ad-brand-mark">{BRAND.initial}</span><span><strong>{BRAND.name}</strong><small>{BRAND.tagline}</small></span></a>
-        {(IS_PROVIDER ? ["SecureCloud"] as const : ["Store"] as const).map((group) => (
+        {[SURFACE_GROUP].map((group) => (
           <div key={group} className="ad-nav-group">
             <p>{group}</p>
             <nav aria-label={group === "Store" ? "Admin navigation" : "SecureCloud navigation"}>
               {PAGES.filter((item) => item.group === group).map((item) => {
                 const Icon = item.icon;
-                const badge = item.id === "orders" ? openOrders : item.id === "security" ? openIncidents : 0;
+                const badge = item.id === "orders" ? openOrders : item.id === "alerts" ? openIncidents : 0;
                 return (
                   <button key={item.id} className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => navigate(item.id)}>
                     <Icon size={17} aria-hidden="true" /><span>{item.label}</span>
-                    {badge > 0 && <b className={item.id === "security" ? "alert" : ""}>{badge}</b>}
+                    {badge > 0 && <b className={item.id === "alerts" ? "alert" : ""}>{badge}</b>}
                   </button>
                 );
               })}
@@ -209,6 +219,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
           </div>
         ))}
         {!IS_PROVIDER && <a className="ad-nav-external" href={STOREFRONT} target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" />View storefront</a>}
+
         <div className="ad-sidebar-status">
           <span className={`ad-pulse ${data?.apiOnline ? "on" : "off"}`} aria-hidden="true" />
           <div><strong>{data?.apiOnline ? (IS_PROVIDER ? "Platform online" : "Protected by SecureCloud") : "Status unavailable"}</strong><small>{IS_PROVIDER ? (openIncidents ? `${openIncidents} open incident${openIncidents === 1 ? "" : "s"}` : "No open incidents") : "Security is managed by your platform provider"}</small></div>
@@ -219,7 +230,7 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
         <header className="ad-topbar">
           <button className="ad-icon-button ad-menu" onClick={() => setMenu((value) => !value)} aria-label="Toggle admin navigation">{menu ? <X size={18} /> : <Menu size={18} />}</button>
           <div className="ad-crumb"><span>{BRAND.name}</span><span aria-hidden="true">/</span><strong>{current.label}</strong></div>
-          <ActionSearchBar className="ad-command" items={commands} defaultRecent={IS_PROVIDER ? ["page:lab", "page:security"] : ["page:orders", "page:products"]}
+          <ActionSearchBar className="ad-command" items={commands} defaultRecent={IS_LAB ? ["page:lab"] : IS_PROVIDER ? ["page:security"] : ["page:orders", "page:products"]}
             onSelect={(item) => runCommand(item)} shortcut label="Search admin" placeholder={IS_PROVIDER ? "Go to a page…" : "Search orders, customers, products…"} />
           <div className="ad-topbar-end">
             <ProfileDropdown compact showPreferences={false}
@@ -234,13 +245,18 @@ function AdminShell({ service, owner, onLogout }: { service: AdminService; owner
             ? <div className="ad-loading"><Loader size="sm" title="Loading store operations" subtitle="Orders, customers, services and security" /></div>
             : data && (
               <>
-                {page === "overview" && <Dashboard data={data} navigate={(next, nextId) => navigate(next, nextId ?? null)} refresh={refresh} onLoadSample={loadSample} loadingSample={loadingSample} />}
+                {page === "overview" && <Dashboard data={data} navigate={(next, nextId) => navigate(next, nextId ?? null)} refresh={refresh} onLoadSample={SHOP.fixed ? loadSample : undefined} loadingSample={loadingSample} />}
                 {page === "orders" && <Orders data={data} service={service} query={query} setQuery={setQuery} refresh={refresh} selectedId={id} select={(next) => navigate("orders", next)} />}
                 {page === "customers" && <Customers data={data} query={query} setQuery={setQuery} openOrder={(orderId) => navigate("orders", orderId)} />}
-                {page === "products" && <Products data={data} service={service} query={query} setQuery={setQuery} refresh={refresh} onLoadSample={loadSample} loadingSample={loadingSample} />}
+                {page === "products" && <Products data={data} service={service} query={query} setQuery={setQuery} refresh={refresh} onLoadSample={SHOP.fixed ? loadSample : undefined} loadingSample={loadingSample} />}
+                {page === "settings" && <Settings service={service} />}
                 {page === "lab" && <Lab data={data} service={service} refresh={refresh} />}
-                {page === "security" && <Security data={data} service={service} refresh={refresh} />}
-                {page === "services" && <Services service={service} />}
+                {page === "security" && <Security data={data} service={service} refresh={refresh} onViewAlerts={() => navigate("alerts")} />}
+                {page === "alerts" && <Alerts data={data} service={service} refresh={refresh} />}
+                {page === "shops" && <Shops service={service} />}
+                {page === "traffic" && <TrafficPage data={data} services={services} />}
+                {page === "workloads" && <Workloads data={data} services={services} />}
+                {page === "policies" && <Policies data={data} services={services} service={service} />}
               </>
             )}
         </main>

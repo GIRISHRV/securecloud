@@ -59,6 +59,35 @@ const platformServiceSchema = z.object({
   status: z.string(), quarantined: z.boolean(), calls: z.array(z.string()),
 });
 export type PlatformService = z.infer<typeof platformServiceSchema>;
+const providerShopSchema = z.object({
+  slug: z.string(), name: z.string(), tagline: z.string(), theme: z.string(), fixed: z.boolean(),
+  state: z.string(), status: z.string(),
+  owner: z.object({ email: z.string(), display_name: z.string() }).nullable(),
+  tenant_id: z.string().nullable(), created_at: z.number(),
+  mode: z.enum(["learn", "monitor", "protect"]).optional(), mode_auto: z.boolean().optional(), staff: z.number().optional(),
+}).passthrough();
+export type ProviderShop = z.infer<typeof providerShopSchema>;
+const usageSchema = z.record(z.string(), z.object({ used: z.string(), hard: z.string() }));
+const postureSchema = z.object({ score: z.number().nullable(), passed: z.number(), total: z.number(),
+  checks: z.array(z.object({ id: z.string(), title: z.string(), refs: z.array(z.string()), passed: z.boolean(), failing: z.array(z.string()) })) });
+const adviceSchema = z.object({ window_seconds: z.number(),
+  unused_permissions: z.array(z.object({ source: z.string(), destination: z.string(), recommendation: z.string() })),
+  blocked_paths: z.array(z.object({ source: z.string(), destination: z.string(), port: z.number().nullable(), attempts: z.number(), last_seen: z.number(),
+    cross_tenant: z.boolean(), suspicious_source: z.boolean(), recommendation: z.string(), draft: z.string().optional() })) });
+const scorecardSchema = z.object({ runs: z.number(), prevention_rate: z.number().nullable(), prevention: z.object({ blocked: z.number(), expected: z.number(), unverified: z.number().default(0) }),
+  baseline_prevention_rate: z.number().nullable().default(null),
+  detection_rate: z.number().nullable(), detection: z.object({ detected: z.number(), attack_runs: z.number() }),
+  false_positive_rate: z.number().nullable(), false_positives: z.object({ flagged: z.number(), benign_runs: z.number() }),
+  time_to_detect_s: z.number().nullable(), containment_time_s: z.number().nullable(), containments: z.number(),
+  overhead: z.object({ order_ms_on: z.number().nullable(), order_ms_off: z.number().nullable(), delta_ms: z.number().nullable(), runs_on: z.number(), runs_off: z.number() }),
+  recent: z.array(z.object({ run: z.string(), title: z.string(), kind: z.string(), mitre: z.array(z.string()), at: z.number(),
+    blocked: z.number().nullable().optional(), expected_blocks: z.number().nullable().optional(), detected: z.boolean(), false_positive: z.boolean().optional() })) });
+const teamSchema = z.object({ owner_is_you: z.boolean(), members: z.array(z.object({ user_id: z.string(), email: z.string(), display_name: z.string(), added_at: z.number() })) });
+export type Posture = z.infer<typeof postureSchema>;
+export type Advice = z.infer<typeof adviceSchema>;
+export type Scorecard = z.infer<typeof scorecardSchema>;
+export type Usage = z.infer<typeof usageSchema>;
+export type Team = z.infer<typeof teamSchema>;
 
 
 const labStepSchema = z.object({
@@ -101,6 +130,7 @@ const labRunSchema = labRunSummarySchema.extend({
 const labScenarioSchema = z.object({
   id: z.string(), title: z.string(), kind: z.enum(["benign", "attack", "verify"]), summary: z.string(),
   what_to_watch: z.string(), tags: z.array(z.string()), source: z.string(), targets: z.array(z.string()),
+  mitre: z.array(z.object({ id: z.string(), name: z.string() })).default([]),
 });
 const labStatusSchema = z.object({
   ready: z.boolean(),
@@ -233,6 +263,62 @@ export class AdminService {
     });
     if (!response.ok) throw await this.error(response, "Could not update order status");
     return orderSchema.parse(await response.json());
+  }
+
+  async uploadImage(file: File) {
+    if (file.size > 3 * 1024 * 1024) throw new Error("Images must be 3 MB or smaller");
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error("Could not read the file"));
+      reader.readAsDataURL(file);
+    });
+    const response = await fetch(`${ADMIN_API}/admin/media`, { method: "POST", headers: this.headers(), body: JSON.stringify({ data }) });
+    if (!response.ok) throw await this.error(response, "Could not upload the image");
+    return z.object({ path: z.string() }).parse(await response.json()).path;
+  }
+
+  private async send<T>(path: string, method: string, body: unknown, schema: z.ZodType<T>, fallback: string) {
+    const response = await fetch(path, { method, headers: this.headers(), body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!response.ok) throw await this.error(response, fallback);
+    return response.status === 204 ? (undefined as T) : schema.parse(await response.json());
+  }
+
+  setShopMode(slug: string, mode: "learn" | "monitor" | "protect") {
+    return this.send(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/mode`, "POST", { mode }, providerShopSchema, "Could not change the mode");
+  }
+  shopLifecycle(slug: string, action: "pause" | "resume", confirm: string) {
+    return this.send(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/${action}`, "POST", { confirm }, providerShopSchema, `Could not ${action} the shop`);
+  }
+  shopPolicies(slug: string) { return this.get(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/policies`, z.object({ documents: z.number(), yaml: z.string() })); }
+  shopPosture(slug: string) { return this.get(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/posture`, postureSchema); }
+  shopUsage(slug: string) { return this.get(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/usage`, usageSchema); }
+  policyAdvice() { return this.get(`${ADMIN_API}/admin/policy/advice`, adviceSchema); }
+  labScorecard() { return this.get(`${ADMIN_API}/admin/lab/scorecard`, scorecardSchema); }
+  async evidence(incidentId: string) {
+    const response = await fetch(`${ADMIN_API}/admin/security/incidents/${encodeURIComponent(incidentId)}/evidence`);
+    if (!response.ok) throw await this.error(response, "Could not build the evidence pack");
+    return response.blob();
+  }
+  // Shop owner (mall) endpoints: same shared session, so the same CSRF token works.
+  ownerUsage(slug: string) { return this.get(`/api/mall/shops/${encodeURIComponent(slug)}/usage`, usageSchema); }
+  ownerLifecycle(slug: string, action: "pause" | "resume", confirm: string) {
+    return this.send(`/api/mall/shops/${encodeURIComponent(slug)}/${action}`, "POST", { confirm }, z.object({ state: z.string() }).passthrough(), `Could not ${action} the shop`);
+  }
+  team(slug: string) { return this.get(`/api/mall/shops/${encodeURIComponent(slug)}/team`, teamSchema); }
+  addMember(slug: string, email: string) { return this.send(`/api/mall/shops/${encodeURIComponent(slug)}/team`, "POST", { email }, z.object({ id: z.string() }).passthrough(), "Could not add that person"); }
+  removeMember(slug: string, userId: string) { return this.send(`/api/mall/shops/${encodeURIComponent(slug)}/team/${encodeURIComponent(userId)}`, "DELETE", undefined, z.undefined(), "Could not remove that person"); }
+
+  async providerShops() {
+    return this.get(`${ADMIN_API}/admin/shops`, z.object({ items: z.array(providerShopSchema), quota: z.object({ used: z.number(), limit: z.number() }) }));
+  }
+
+  async removeShop(slug: string, confirm: string) {
+    const response = await fetch(`${ADMIN_API}/admin/shops/${encodeURIComponent(slug)}/remove`, {
+      method: "POST", headers: this.headers(), body: JSON.stringify({ confirm }),
+    });
+    if (!response.ok) throw await this.error(response, "Could not remove the shop");
+    return providerShopSchema.parse(await response.json());
   }
 
   labStatus() { return this.get(`${ADMIN_API}/admin/lab/status`, labStatusSchema); }

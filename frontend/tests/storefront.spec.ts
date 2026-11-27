@@ -45,27 +45,33 @@ async function mockRetail(page: Page) {
   let cart: typeof filledCart = { ...emptyCart, items: [] };
   let orders: unknown[] = [];
 
-  await page.route("**/api/retail/**", async (route) => {
+  await page.route("**/api/mall/shops/northstar", (route) => route.fulfill({
+    status: 200, contentType: "application/json",
+    body: JSON.stringify({ slug: "northstar", name: "Northstar", tagline: "Bags and everyday carry", hero_title: "Everyday goods, built to last.",
+      hero_text: "Bags for daily use.", theme: "navy", fixed: true, state: "live",
+      categories: [{ code: "BAG", name: "Bags" }, { code: "ACC", name: "Accessories" }, { code: "HOM", name: "Home" }] }),
+  }));
+  await page.route("**/api/shops/northstar/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 
-    if (path === "/api/retail/products") return json({ items: [product] });
-    if (path === "/api/retail/auth/session") {
+    if (path === "/api/shops/northstar/products") return json({ items: [product] });
+    if (path === "/api/shops/northstar/auth/session") {
       return signedIn ? json({ user, csrf: "csrf-token-123456789", session_id: "session-alice" }) : json({ detail: "Sign in" }, 401);
     }
-    if (path === "/api/retail/auth/register") return json({ user }, 201);
-    if (path === "/api/retail/auth/login") {
+    if (path === "/api/shops/northstar/auth/register") return json({ user }, 201);
+    if (path === "/api/shops/northstar/auth/login") {
       signedIn = true;
       return json({ user, csrf: "csrf-token-123456789", session_id: "session-alice" });
     }
-    if (path === "/api/retail/cart/items" && request.method() === "POST") {
+    if (path === "/api/shops/northstar/cart/items" && request.method() === "POST") {
       cart = filledCart;
       return json(cart);
     }
-    if (path === "/api/retail/cart") return json(cart);
-    if (path === "/api/retail/orders") return json({ items: orders });
-    if (path === "/api/retail/checkout") {
+    if (path === "/api/shops/northstar/cart") return json(cart);
+    if (path === "/api/shops/northstar/orders") return json({ items: orders });
+    if (path === "/api/shops/northstar/checkout") {
       const body = request.postDataJSON();
       const order = {
         id: "order-1",
@@ -94,7 +100,7 @@ async function mockRetail(page: Page) {
 
 test("customer registers, checks out, and reopens the order", async ({ page }) => {
   await mockRetail(page);
-  await page.goto("/shop");
+  await page.goto("/northstar/shop");
 
   await expect(page.getByRole("heading", { name: /Everyday goods/ })).toBeVisible();
   await expect(page.getByText("Everyday Backpack", { exact: true }).first()).toBeVisible();

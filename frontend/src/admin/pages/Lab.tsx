@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeftRight, Bug, CheckCircle2, ChevronDown, Crosshair, Lock, Network, Radar, RefreshCcw, RotateCcw, ShieldCheck, ShoppingCart, Upload, XCircle } from "lucide-react";
+import { ArrowLeftRight, Bug, KeyRound, Server, CheckCircle2, ChevronDown, Crosshair, Lock, Network, Radar, RefreshCcw, RotateCcw, ShieldCheck, ShoppingCart, Upload, XCircle } from "lucide-react";
 import HoldButton from "@/components/kokonutui/hold-button";
-import type { AdminService, AdminSnapshot, LabRun, LabRunSummary, LabScenario, LabStatus } from "../adminService";
+import type { AdminService, AdminSnapshot, LabRun, LabRunSummary, LabScenario, LabStatus, Scorecard } from "../adminService";
 import { AreaChart } from "../charts";
 import { errorText, useToaster } from "../toast";
 import { Status, relative } from "../ui";
 import { ADMIN_API } from "../../shop";
+import { addEdge, ServiceMap, type MapEdge } from "../serviceMap";
 
 /* Short, plain labels; the full description lives in the button tooltip. */
 type Group = "normal" | "rules" | "model" | "check";
@@ -22,36 +23,14 @@ const BUTTONS: Record<string, { label: string; hint: string; icon: typeof Bug; t
   "network-sweep": { label: "Network sweep", hint: "Plugin tries every service on the platform", icon: Network, tone: "attack", group: "rules" },
   "plugin-port-scan": { label: "Port scan", hint: "Plugin scans ports on the order API", icon: Radar, tone: "attack", group: "rules" },
   "data-exfiltration": { label: "Steal data out", hint: "Order API tries to send data outside the cluster", icon: Upload, tone: "attack", group: "rules" },
+  "cloud-metadata": { label: "Steal cloud credentials", hint: "Plugin tries the instance-metadata address", icon: KeyRound, tone: "attack", group: "rules" },
+  "reach-control-plane": { label: "Reach the Kubernetes API", hint: "Plugin dials the cluster API server", icon: Server, tone: "attack", group: "rules" },
   "plugin-valid-path-burst": { label: "Abuse valid access", hint: "Plugin floods the API it is allowed to use", icon: Crosshair, tone: "attack", group: "model" },
   "containment-check": { label: "Test quarantine", hint: "Prove the plugin is cut off, or restored", icon: ShieldCheck, tone: "check", group: "check" },
   "quarantine-restart": { label: "Restart quarantined plugin", hint: "New pod, same label: still cut off?", icon: RefreshCcw, tone: "check", group: "check" },
 };
 const ORDER = Object.keys(BUTTONS);
 
-/* Fixed map layout (viewBox 920 × 400). */
-const NODES: Record<string, { x: number; y: number; label: string }> = {
-  shopper: { x: 75, y: 110, label: "Shopper" },
-  "northstar-web": { x: 215, y: 110, label: "Storefront" },
-  "northstar-api": { x: 370, y: 110, label: "Order API" },
-  "northstar-database": { x: 520, y: 110, label: "Orders DB" },
-  "shipfast-plugin": { x: 215, y: 300, label: "ShipFast plugin" },
-  "bloom-web": { x: 795, y: 80, label: "Storefront" },
-  "bloom-api": { x: 795, y: 200, label: "Order API" },
-  "bloom-database": { x: 795, y: 325, label: "Orders DB" },
-  "order-ids": { x: 330, y: 465, label: "Order IDs" },
-  payments: { x: 520, y: 465, label: "Payments" },
-  email: { x: 710, y: 465, label: "Email" },
-  internet: { x: 862, y: 465, label: "Internet" },
-};
-const BASE_EDGES: Array<[string, string]> = [
-  ["shopper", "northstar-web"], ["northstar-web", "northstar-api"], ["northstar-api", "northstar-database"],
-  ["shipfast-plugin", "northstar-api"], ["bloom-web", "bloom-api"], ["bloom-api", "bloom-database"],
-  ["northstar-api", "order-ids"], ["northstar-api", "payments"], ["northstar-api", "email"],
-  ["bloom-api", "order-ids"], ["bloom-api", "payments"], ["bloom-api", "email"],
-];
-
-type Edge = { from: string; to: string; allowed: number; blocked: number };
-const WALL_X = 636;
 
 export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: AdminService; refresh: () => Promise<void> }) {
   const toaster = useToaster();
@@ -140,18 +119,35 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
   }
 
   async function resetDemo() {
+    const locked = data.security.incidents.filter((item) => item.status === "quarantined" || item.status === "review");
+    const names = locked.map((item) => item.sourceName).join(", ");
+    if (!window.confirm(`Reset the testbed?\n\n${locked.length ? `Unlock: ${names}\n` : ""}Close open alerts and clear earlier runs. Nothing is deleted.`)) return;
     try {
+      for (const item of locked) {  // same audited, cluster-verified path an operator would use
+        if (item.status === "quarantined") await service.respondToIncident(item.id, "review");
+        await service.respondToIncident(item.id, "restore");
+        say("allow", `restored ${item.sourceName}`);
+      }
       setStatus(await service.resetLab());
       setRuns([]); setSelectedId(null); setRun(null); setActions([]);
       await refresh();
     } catch (reason) { say("error", errorText(reason, "Could not reset")); }
   }
   const ready = Boolean(status?.ready);
+  const totals = runs.reduce((sum, item) => {
+    const result = item.result;
+    if (!result) return sum;
+    sum.blocked += result.blocked_as_expected;
+    sum.expected += result.expected_blocks;
+    sum.unconfirmed += result.expected_blocks - result.blocked_as_expected;
+    if (result.order_complete) sum.orders += 1;
+    return sum;
+  }, { blocked: 0, expected: 0, unconfirmed: 0, orders: 0 });
 
   return (
     <div className="lab2">
       <header className="lab2-head">
-        <div><h1>Live lab</h1><p>Click a scenario. Watch real traffic hit the cluster.</p></div>
+        <div><h1>Attack testbed</h1><p>Synthetic attacks inside the isolated lab. Not part of the production console.</p></div>
         <div className="lab2-dots" aria-label="Lab status">
           <button className={`lab2-switch ${protectedOn ? "on" : "off"}`} role="switch" aria-checked={protectedOn}
             disabled={!ready || switching || Boolean(status?.running)} onClick={() => void toggleProtection()}
@@ -170,9 +166,15 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
       {status && !ready && <p className="lab2-offline">Lab is offline. Start it with <code>start.ps1</code>.</p>}
       {status && !protectedOn && <p className="lab2-unprotected"><strong>SecureCloud is OFF.</strong> No tenant walls and no detection: the cluster is flat, like a plain Kubernetes setup. Run the attacks to see what gets through.</p>}
 
-      <section className="lab2-stage">
-        <div className="lab2-board">
-          <nav className="lab2-list" aria-label="Scenarios">
+      <div className="lab3-stats">
+        <div><strong>{runs.length}</strong><span>Runs this session</span></div>
+        <div className="good"><strong>{totals.blocked}<small>/{totals.expected}</small></strong><span>Attacks blocked</span></div>
+        <div className={totals.unconfirmed ? "bad" : ""}><strong>{totals.unconfirmed}</strong><span>Not confirmed blocked</span></div>
+        <div><strong>{totals.orders}</strong><span>Orders placed</span></div>
+      </div>
+
+      <section className="lab3">
+          <nav className="lab2-list lab3-list" aria-label="Scenarios">
             <p className="lab2-list-title">Scenarios</p>
             {GROUPS.map((group) => {
               const items = [...scenarios]
@@ -194,7 +196,8 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
                           <button className={`lab2-row ${meta.tone} ${active ? "active" : ""}`} title={scenario.summary} aria-current={active || undefined}
                             disabled={!ready || Boolean(status?.running) || Boolean(starting)} onClick={() => void start(scenario)}>
                             <Icon className="lab2-row-icon" size={16} aria-hidden="true" />
-                            <span className="lab2-row-text"><strong>{meta.label}</strong><small>{meta.hint}</small></span>
+                            <span className="lab2-row-text"><strong>{meta.label}</strong><small>{meta.hint}</small>
+                              {scenario.mitre.length > 0 && <span className="lab2-mitre">{scenario.mitre.map((t) => <em key={t.id} title={`MITRE ATT&CK ${t.id}: ${t.name}`}>{t.id}</em>)}</span>}</span>
                             <span className="lab2-row-end" aria-hidden="true">{starting === scenario.id ? "Starting…" : running ? "Running…" : "›"}</span>
                           </button>
                         </li>
@@ -205,29 +208,32 @@ export function Lab({ data, service, refresh }: { data: AdminSnapshot; service: 
               );
             })}
           </nav>
-          <LiveMap run={run} quarantined={Boolean(plugin?.quarantined)} live={live} />
+        <div className="lab3-center">
+          <ServiceMap edges={edgesFor(run)} quarantined={new Set(plugin?.quarantined ? ["shipfast-plugin"] : [])} source={run?.evidence.source.name} live={live} />
+          <Console run={run} actions={actions} live={live} />
         </div>
-        <Outcome run={run} live={live} incident={incident} quarantined={Boolean(plugin?.quarantined)} respond={respond} />
+        <aside className="lab3-side">
+          <Outcome run={run} live={live} incident={incident} quarantined={Boolean(plugin?.quarantined)} respond={respond} />
+          <div className="lab3-runs">
+            <h3>Recent runs</h3>
+            {runs.length
+              ? <ul className="lab2-history">
+                  {runs.slice(0, 8).map((item) => (
+                    <li key={item.id}><button className={item.id === selectedId ? "active" : ""} onClick={() => setSelectedId(item.id)}>
+                      <span>{BUTTONS[item.scenario_id]?.label ?? item.title}</span>
+                      <small>{relative(item.created_at)}</small>
+                      <Verdict summary={item} />
+                    </button></li>
+                  ))}
+                </ul>
+              : <p>No runs yet. Pick a scenario on the left.</p>}
+          </div>
+        </aside>
       </section>
-
-      <Console run={run} actions={actions} live={live} />
 
       {run && <Evidence run={run} />}
 
-      {runs.length > 0 && (
-        <details className="lab2-fold">
-          <summary><ChevronDown size={16} aria-hidden="true" />Past runs ({runs.length})</summary>
-          <ul className="lab2-history">
-            {runs.map((item) => (
-              <li key={item.id}><button className={item.id === selectedId ? "active" : ""} onClick={() => setSelectedId(item.id)}>
-                <span>{BUTTONS[item.scenario_id]?.label ?? item.title}</span>
-                <small>{relative(item.created_at)}</small>
-                <Verdict summary={item} />
-              </button></li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <ScorecardPanel service={service} refreshKey={runs.length} />
     </div>
   );
 }
@@ -244,96 +250,16 @@ function Verdict({ summary }: { summary: LabRunSummary }) {
   return <Status value={summary.result.matched === summary.result.steps ? "succeeded" : "neutral"} label={`${summary.result.matched}/${summary.result.steps} as expected`} />;
 }
 
-function edgesFor(run: LabRun | null): Edge[] {
+function edgesFor(run: LabRun | null): MapEdge[] {
   if (!run) return [];
-  const map = new Map<string, Edge>();
-  const add = (from: string, to: string, allowed: number, blocked: number) => {
-    // Draw only what Hubble actually observed; nothing matched yet means no edge.
-    if (!NODES[from] || !NODES[to] || allowed + blocked === 0) return;
-    const key = `${from}>${to}`;
-    const edge = map.get(key) ?? { from, to, allowed: 0, blocked: 0 };
-    edge.allowed += allowed; edge.blocked += blocked;
-    map.set(key, edge);
-  };
+  const map = new Map<string, MapEdge>();
+  // Draw only what Hubble actually observed; nothing matched yet means no edge.
   const source = run.evidence.source.name ?? "";
   for (const step of run.steps) {
-    if (step.verdict) add(source, step.target, step.verdict.forwarded, step.verdict.dropped);
-    for (const hop of step.downstream ?? []) add(hop.source, hop.destination, hop.forwarded, hop.dropped);
+    if (step.verdict) addEdge(map, source, step.target, step.verdict.forwarded, step.verdict.dropped);
+    for (const hop of step.downstream ?? []) addEdge(map, hop.source, hop.destination, hop.forwarded, hop.dropped);
   }
   return [...map.values()];
-}
-
-function line(from: string, to: string) {
-  const a = NODES[from], b = NODES[to];
-  return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
-}
-
-function LiveMap({ run, quarantined, live }: { run: LabRun | null; quarantined: boolean; live: boolean }) {
-  const edges = edgesFor(run);
-  const touched = new Set(edges.flatMap((edge) => [edge.from, edge.to]));
-  const source = run?.evidence.source.name;
-  return (
-    <div className="lab2-map">
-      <svg viewBox="0 0 920 530" role="img" aria-label="Service map with live connection verdicts">
-        <rect className="zone retail" x="12" y="12" width="580" height="376" rx="16" />
-        <text className="zone-label" x="30" y="38">Northstar (bags)</text>
-        <rect className="zone vendor" x="680" y="12" width="228" height="376" rx="16" />
-        <text className="zone-label" x="698" y="38">Bloom (candles)</text>
-        <rect className="zone platform" x="12" y="408" width="896" height="112" rx="16" />
-        <text className="zone-label" x="30" y="432">Mall platform (shared)</text>
-        <line className="wall" x1="636" x2="636" y1="30" y2="182" /><line className="wall" x1="636" x2="636" y1="222" y2="370" />
-        <text className="wall-label" x="636" y="206" textAnchor="middle">tenant wall</text>
-
-        {BASE_EDGES.map(([from, to]) => <line key={`b-${from}-${to}`} className="edge-base" {...line(from, to)} />)}
-
-        {edges.map((edge) => {
-          const blocked = edge.blocked > 0 && edge.allowed === 0;
-          const mixed = edge.blocked > 0 && edge.allowed > 0;
-          const pts = line(edge.from, edge.to);
-          // A blocked cross-tenant attempt stops at the tenant wall; other blocks stop halfway.
-          const crosses = (pts.x1 - WALL_X) * (pts.x2 - WALL_X) < 0;
-          const t = blocked && crosses ? (WALL_X - pts.x1) / (pts.x2 - pts.x1) : 0.5;
-          const stop = { x: pts.x1 + (pts.x2 - pts.x1) * t, y: pts.y1 + (pts.y2 - pts.y1) * t };
-          const end = blocked ? stop : { x: pts.x2, y: pts.y2 };
-          const path = `M${pts.x1},${pts.y1} L${end.x},${end.y}`;
-          const towardSource = pts.x1 > stop.x ? 1 : -1;
-          return (
-            <g key={`${edge.from}-${edge.to}`} className={blocked ? "edge blocked" : mixed ? "edge mixed" : "edge allowed"}>
-              <line x1={pts.x1} y1={pts.y1} x2={end.x} y2={end.y} className="edge-line" />
-              {[0, 0.3, 0.6].map((delay) => (
-                <circle key={delay} r="5" className="packet">
-                  <animateMotion dur="0.9s" begin={`${delay}s`} repeatCount="indefinite" path={path} />
-                </circle>
-              ))}
-              {(blocked || mixed) && (
-                <g transform={`translate(${stop.x} ${stop.y})`} className="stop">
-                  <circle r="11" /><path d="M-5,-5 L5,5 M5,-5 L-5,5" />
-                </g>
-              )}
-              <text className="edge-count" x={blocked ? stop.x + towardSource * 16 : stop.x} y={blocked ? stop.y + 4 : stop.y - 14}
-                textAnchor={blocked ? (towardSource > 0 ? "start" : "end") : "middle"}>
-                {blocked ? `${edge.blocked} blocked` : mixed ? `${edge.blocked} blocked · ${edge.allowed} ok` : `${edge.allowed} ok`}
-              </text>
-            </g>
-          );
-        })}
-
-        {Object.entries(NODES).map(([id, node]) => {
-          const isSource = id === source;
-          const isQuarantined = id === "shipfast-plugin" && quarantined;
-          return (
-            <g key={id} className={`node ${touched.has(id) ? "touched" : ""} ${isSource ? "source" : ""} ${isQuarantined ? "quarantined" : ""}`} transform={`translate(${node.x} ${node.y})`}>
-              {isSource && live && <circle r="40" className="pulse" />}
-              <rect x="-54" y="-20" width="108" height="40" rx="10" />
-              <text y="5" textAnchor="middle">{node.label}</text>
-              {isQuarantined && <g transform="translate(46 -20)" className="lock"><circle r="11" /><path d="M-4,-1 h8 v6 h-8 z M-2.5,-1 v-3 a2.5,2.5 0 0 1 5,0 v3" /></g>}
-            </g>
-          );
-        })}
-      </svg>
-      <div className="lab2-legend"><span className="ok">Allowed</span><span className="bad">Blocked by policy</span>{quarantined && <span className="lock">ShipFast plugin quarantined</span>}</div>
-    </div>
-  );
 }
 
 function Outcome({ run, live, incident, quarantined, respond }: {
@@ -468,5 +394,32 @@ function Evidence({ run }: { run: LabRun }) {
         )}
       </div>
     </details>
+  );
+}
+
+
+/* Evaluation scorecard: computed on the server from recorded runs only. "Not measured" means no runs yet. */
+function ScorecardPanel({ service, refreshKey }: { service: AdminService; refreshKey: number }) {
+  const [card, setCard] = useState<Scorecard | null>(null);
+  useEffect(() => { service.labScorecard().then(setCard).catch(() => undefined); }, [service, refreshKey]);
+  if (!card) return null;
+  const pct = (value: number | null) => (value === null ? "Not measured" : `${Math.round(value * 100)}%`);
+  const secs = (value: number | null) => (value === null ? "Not measured" : `${value.toFixed(1)} s`);
+  const tiles = [
+    { label: "Prevention rate", value: pct(card.prevention_rate),
+      note: `${card.prevention.blocked}/${card.prevention.expected} observed attempts dropped${card.prevention.unverified ? ` · ${card.prevention.unverified} unverified` : ""}${card.baseline_prevention_rate !== null ? ` · with SecureCloud off: ${pct(card.baseline_prevention_rate)}` : ""}` },
+    { label: "Detection rate", value: pct(card.detection_rate), note: `${card.detection.detected}/${card.detection.attack_runs} attack runs` },
+    { label: "False-positive rate", value: pct(card.false_positive_rate), note: `${card.false_positives.flagged}/${card.false_positives.benign_runs} normal runs flagged` },
+    { label: "Time to detect", value: secs(card.time_to_detect_s), note: "median, run start to risk over threshold" },
+    { label: "Containment time", value: secs(card.containment_time_s), note: `median of ${card.containments} verified isolation${card.containments === 1 ? "" : "s"}` },
+    { label: "Policy overhead", value: card.overhead.delta_ms === null ? "Not measured" : `${card.overhead.delta_ms > 0 ? "+" : ""}${card.overhead.delta_ms} ms`,
+      note: card.overhead.delta_ms === null ? "needs order runs with SecureCloud on and off" : `order round trip, on ${card.overhead.order_ms_on} ms vs off ${card.overhead.order_ms_off} ms` },
+  ];
+  return (
+    <section className="lab3-score" aria-label="Evaluation scorecard">
+      <header><h2>Evaluation scorecard</h2><p>From {card.runs} recorded run{card.runs === 1 ? "" : "s"} in the last 7 days. Nothing here is estimated.</p></header>
+      <div className="lab3-score-grid">{tiles.map((tile) => (
+        <div key={tile.label}><span>{tile.label}</span><strong>{tile.value}</strong><small>{tile.note}</small></div>))}</div>
+    </section>
   );
 }
