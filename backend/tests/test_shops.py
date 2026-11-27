@@ -243,3 +243,20 @@ def test_older_account_databases_are_migrated_to_allow_the_guest_role(tmp_path):
     assert migrated.role(user["id"], "securecloud") == "provider"  # existing grants kept
     migrated.grant(user["id"], "reviewers", "guest")
     assert migrated.role(user["id"], "reviewers") == "guest"
+
+
+def test_guest_sees_no_merchant_emails_and_can_only_contain_testbed_tenants(tmp_path):
+    app, password, users = make_mall(tmp_path)
+    shop = app.state.shops.create({"user_id": users["maya@example.com"]["id"]}, request())
+    guest_user = app.state.accounts.create_user("guest@example.com", password, "Guest Reviewer")
+    app.state.accounts.grant(guest_user["id"], "securecloud", "guest")
+    guest = signed_in(app, "guest@example.com", password)
+    listed = guest.get("/api/provider/admin/shops").json()["items"]
+    assert "maya@example.com" not in str(listed)
+    assert next(item for item in listed if item["slug"] == "terra-pots")["owner"]["email"] == "hidden from guest"
+    provider = provider_client(app, password)
+    assert "maya@example.com" in str(provider.get("/api/provider/admin/shops").json())  # the real provider still sees it
+
+    store = app.state.store
+    assert shop["tenant_id"] in store.retail_security_scope("securecloud")
+    assert shop["tenant_id"] not in store.retail_security_scope("securecloud", testbed_only=True)

@@ -582,8 +582,13 @@ def create_app(settings: Settings) -> FastAPI:
 
         @app.get("/api/provider/admin/shops")
         def provider_shops(request: Request):
-            provider(request)
-            return {"items": [shops.provider_view(shop) for shop in shops.shops()], "quota": shops.usage()}
+            account = provider(request)
+            items = [shops.provider_view(shop) for shop in shops.shops()]
+            if accounts.role(account["user_id"], "securecloud") == "guest":  # public login: no merchant PII
+                for item in items:
+                    if item.get("owner"):
+                        item["owner"] = {"display_name": "Merchant", "email": "hidden from guest"}
+            return {"items": items, "quota": shops.usage()}
 
         @app.post("/api/provider/admin/shops/{slug}/remove", status_code=202)
         def provider_remove(slug: str, body: ShopRemoval, request: Request):

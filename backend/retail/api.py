@@ -148,7 +148,7 @@ def create_retail_router(
         allowed = ("provider", "guest") if mode == "provider" else ("owner",)
         role = "owner" if granted in allowed else "customer"
         if mode == "provider":
-            return dict(row, role=role, tenant_id=shop_id)
+            return dict(row, role=role, tenant_id=shop_id, guest=granted == "guest")
         return dict(row, user_id=local_profile(store, row, role), role=role, tenant_id=store.tenant_id)
 
     def session(request: Request, mutate=False, owner=False):
@@ -177,7 +177,7 @@ def create_retail_router(
     def security_scope(owner) -> set[str]:
         if correlation_store is None:
             return {owner["tenant_id"]}
-        return correlation_store.retail_security_scope(owner["tenant_id"])
+        return correlation_store.retail_security_scope(owner["tenant_id"], testbed_only=bool(owner.get("guest")))
 
     def authorize_security_incident(owner, incident_id: str):
         if correlation_store is None:

@@ -16,7 +16,7 @@ from .infrastructure import (
     StackRequest,
     WorkloadRequest,
 )
-from .catalog import shop_stack_ids
+from .catalog import LEGACY_SHOP_STACKS, shop_stack_ids
 from .telemetry.schema import NormalizedFlow, WorkloadIdentity
 
 REFERENCE_LAB_REVISION = "0.2.0"
@@ -822,10 +822,14 @@ class Store:
             ).fetchall()
         return {row["application_event_id"]: dict(row) for row in rows}
 
-    def retail_security_scope(self, retail_tenant_id: str) -> set[str]:
-        """Return the explicitly deployed lab tenant scope (shops and legacy retail/vendor)."""
+    def retail_security_scope(self, retail_tenant_id: str, testbed_only: bool = False) -> set[str]:
+        """Return the explicitly deployed lab tenant scope (shops and legacy retail/vendor).
+
+        testbed_only narrows it to the fixed testbed (Northstar, Bloom, platform), which is all the
+        public guest reviewer may contain; merchants' own shops stay out of its reach."""
         with self.connect() as db:
-            stacks = ("retail-stack", "facilities-vendor-stack", "platform-stack") + shop_stack_ids()
+            stacks = ("retail-stack", "facilities-vendor-stack", "platform-stack") + (
+                LEGACY_SHOP_STACKS if testbed_only else shop_stack_ids())
             rows = db.execute(
                 f"""SELECT DISTINCT tenant_id FROM stack_deployments
                    WHERE desired!='deleted' AND stack_id IN ({",".join("?" * len(stacks))})""",
