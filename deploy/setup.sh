@@ -32,8 +32,8 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 k3s kubectl apply -f "${APP}/backend/manifests/lab/securecloud-rbac.yaml"
 
 step "Workload images (shop template, platform services, storefront)"
-docker build -q -t docker.io/securecloud/reference-api:0.6.0 "${APP}/backend/reference_apps"
-docker build -q -t docker.io/securecloud/reference-web:0.2.0 "${APP}/frontend/reference-app"
+docker build --network host -q -t docker.io/securecloud/reference-api:0.6.0 "${APP}/backend/reference_apps"
+docker build --network host -q -t docker.io/securecloud/reference-web:0.2.0 "${APP}/frontend/reference-app"
 docker save docker.io/securecloud/reference-api:0.6.0 docker.io/securecloud/reference-web:0.2.0 | k3s ctr images import -
 
 step "Service user, data directory and least-privilege kubeconfig"
