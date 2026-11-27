@@ -11,7 +11,7 @@ if [[ "$#" -ne 1 ]]; then
 fi
 
 readonly OUTPUT_PATH="$1"
-readonly MANIFEST_PATH="/mnt/e/GIRISH/Projects/actualfyp/backend/manifests/lab/securecloud-rbac.yaml"
+readonly MANIFEST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/securecloud-rbac.yaml"
 readonly NAMESPACE="securecloud-system"
 readonly SECRET_NAME="securecloud-backend-token"
 

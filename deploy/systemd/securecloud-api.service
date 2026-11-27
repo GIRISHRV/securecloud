@@ -1,0 +1,21 @@
+[Unit]
+Description=SecureCloud management and security API
+After=network-online.target k3s.service securecloud-hubble-capture.service
+Wants=network-online.target
+
+[Service]
+User=securecloud
+Group=securecloud
+EnvironmentFile=@ETC@/securecloud.env
+WorkingDirectory=@APP@
+ExecStart=@APP@/.venv-server/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --no-access-log --proxy-headers
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=@DATA@
+
+[Install]
+WantedBy=multi-user.target

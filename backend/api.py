@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from hashlib import sha256
 import json
 import logging
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -232,8 +233,16 @@ def create_app(settings: Settings) -> FastAPI:
     if infrastructure is not None:  # always start protected, even if a demo left SecureCloud off
         threading.Thread(target=lambda: _safely(lab_service.set_protection, True), name='protect-on-start', daemon=True).start()
 
+    retention = {"last": 0.0}
+
     def reconcile_loop():
         while not stop_reconciler.is_set():
+            if time.time() - retention["last"] > 3600:  # hourly flow retention for long-running servers
+                retention["last"] = time.time()
+                try:
+                    store.prune_flows(float(os.environ.get("SECURECLOUD_FLOW_RETENTION_SECONDS", "86400")))
+                except Exception:
+                    logger.exception("Flow retention failed")
             try:
                 store.reconcile_operations()
                 store.reconcile_stack_operations()

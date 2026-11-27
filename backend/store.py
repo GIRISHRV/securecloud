@@ -923,6 +923,11 @@ class Store:
             })
         return events
 
+    def prune_flows(self, max_age_seconds: float = 86_400.0) -> int:
+        """Delete normalized flows older than the retention window (incident evidence keeps its own copy)."""
+        with self.connect() as db:
+            return db.execute("DELETE FROM normalized_flows WHERE observed_at<?", (time.time() - max_age_seconds,)).rowcount
+
     def policy_observations(self, window_seconds: float = 1800.0) -> list[dict]:
         """Resolved flows in the window, grouped by path and verdict (input for the policy advisor)."""
         with self.connect() as db:

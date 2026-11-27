@@ -1,0 +1,16 @@
+[Unit]
+Description=SecureCloud Hubble flow capture (JSON export read by the API)
+After=securecloud-hubble-relay.service
+Wants=securecloud-hubble-relay.service
+
+[Service]
+ExecStart=/usr/local/bin/hubble observe --server 127.0.0.1:4245 --follow --output json
+# The file is truncated on every start; restarting every 6 hours keeps it bounded.
+# The API's collector notices the smaller file and re-reads it.
+StandardOutput=truncate:@DATA@/hubble-current.jsonl
+RuntimeMaxSec=6h
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

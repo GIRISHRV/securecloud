@@ -20,7 +20,8 @@ settings = Settings(
         os.environ.get("SECURECLOUD_RETAIL_DB", "runtime/securecloud-retail-commerce.sqlite")
     ),
     origin=ORIGIN,
-    secure_cookie=False,  # Allow loopback development cookies
+    # Public deployments (HTTPS origin) set SECURECLOUD_SECURE_COOKIE=1: __Host- cookies, Secure only.
+    secure_cookie=os.environ.get("SECURECLOUD_SECURE_COOKIE", "0") == "1",
     session_seconds=86400,
     tenant_limit=int(os.environ.get("SECURECLOUD_TENANT_LIMIT", "2")),
     shop_quota=int(os.environ.get("SECURECLOUD_SHOP_QUOTA", "5")),

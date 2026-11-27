@@ -15,6 +15,7 @@ No security or application events are written; those only come from real traffic
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .retail.accounts import AccountStore
@@ -70,7 +71,10 @@ def main() -> int:
     print(f"Northstar catalogue: {len(northstar.seed_catalog())} products")
     print(f"Bloom catalogue: {len(bloom.seed_catalog(BLOOM_CATALOG))} products")
     if args.accounts.is_file():
+        public = os.environ.get("SECURECLOUD_PUBLIC") == "1"
         for key, email, password in read_accounts(args.accounts):
+            if public and len(password) < 16:
+                raise SystemExit(f"{key}: public deployments need passwords of at least 16 characters")
             name, shop, role = ROLES[key]
             try:
                 user, created = shared.upsert_lab_account(email, password, name, role="customer")

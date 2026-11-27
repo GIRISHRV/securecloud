@@ -1,0 +1,13 @@
+[Unit]
+Description=SecureCloud testbed storefront port-forwards (loopback only)
+After=k3s.service
+Requires=k3s.service
+
+[Service]
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+ExecStart=@APP@/deploy/bin/shop-forwards.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

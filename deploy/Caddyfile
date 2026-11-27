@@ -1,0 +1,18 @@
+# SecureCloud public entry point. Caddy obtains and renews the HTTPS certificate automatically.
+@DOMAIN@ {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		root * @APP@/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

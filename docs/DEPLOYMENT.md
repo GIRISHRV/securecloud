@@ -4,6 +4,32 @@ This guide deploys the lab demonstrator: a single-node K3s cluster with Cilium/H
 FastAPI control plane, and the React portal. It is a lab deployment for an isolated,
 project-owned machine. It is not a production hardening guide.
 
+## Public hosting on Azure for Students (free, no credit card)
+
+1. In the Azure portal create a VM: **Ubuntu Server 24.04 LTS**, size **Standard_B2s** (2 vCPU, 4 GB),
+   authentication with an SSH key. Under *Networking*, allow inbound **SSH (22), HTTP (80), HTTPS (443)**.
+2. Open the VM's **public IP** resource → *Configuration* → set a **DNS name label** (for example
+   `securecloud-demo`). Your domain becomes `securecloud-demo.<region>.cloudapp.azure.com`.
+3. SSH in and run:
+
+   ```bash
+   sudo git clone https://github.com/GIRISHRV/securecloud.git /opt/securecloud
+   sudo /opt/securecloud/deploy/setup.sh securecloud-demo.<region>.cloudapp.azure.com
+   ```
+
+   The first run takes about 15 minutes and prints the generated demo logins once (they are also
+   kept in `/etc/securecloud/demo-accounts.env`, readable only by root and the service).
+4. Later updates: `sudo /opt/securecloud/deploy/update.sh`. Stop the VM from the portal when not
+   demoing to stretch the student credit.
+
+What `setup.sh` installs: K3s + Cilium + Hubble, RBAC and the admission policy, the workload
+images, the API as a sandboxed systemd service (`securecloud-api`), Hubble relay and capture
+services, testbed storefront forwards, and Caddy with an automatic HTTPS certificate. Public
+mode uses secure `__Host-` cookies and refuses to seed any account password shorter than
+16 characters. Logs: `journalctl -u securecloud-api -f`.
+
+## Local lab (Windows + WSL)
+
 ## 1. Cluster (WSL Ubuntu with systemd, or any Linux host)
 
 ```bash
