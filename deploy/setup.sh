@@ -66,7 +66,7 @@ docker save docker.io/securecloud/reference-api:0.6.0 docker.io/securecloud/refe
 step "Service user, data directory and least-privilege kubeconfig"
 id securecloud >/dev/null 2>&1 || useradd --system --home "${DATA}" --shell /usr/sbin/nologin securecloud
 install -d -o securecloud -g securecloud -m 0750 "${DATA}" "${DATA}/media"
-install -d -m 0750 "${ETC}"
+install -d -m 0750 -g securecloud "${ETC}"   # service group may enter; files inside stay 0640
 bash "${APP}/backend/manifests/lab/create-backend-kubeconfig.sh" "${DATA}/securecloud.kubeconfig"
 chown securecloud:securecloud "${DATA}/securecloud.kubeconfig"
 
