@@ -6,13 +6,13 @@
 
 Build a self-service multi-tenant private-cloud prototype with an integrated zero-trust security plane. It is Azure-like only at the portal-workflow level: users create projects, deploy catalog workloads, manage lifecycle and network intent, and inspect health. Kubernetes supplies orchestration; the project does not implement a hypervisor, storage fabric, billing system, or public-cloud scale.
 
-The target demonstrator provisions two tenants and their containerized resources through a minimal portal. The security workflow enforces default-deny communication, detects suspicious behaviour, quarantines an affected workload, and exposes authorized web incident controls. Mobile is deferred. Use `docs/IMPLEMENTATION_PLAN.md` for the active scope and verify implementation claims against code and test evidence.
+The target demonstrator is a multi-shop mall: two fixed testbed shops (Northstar, Bloom) plus merchant shops provisioned on demand from one allowlisted shop template, each its own tenant with containerized resources. The security workflow enforces default-deny communication, detects suspicious behaviour, quarantines an affected workload, and exposes authorized web incident controls. Mobile is deferred. Use `docs/IMPLEMENTATION_PLAN.md` for the active scope and verify implementation claims against code and test evidence.
 
 ## Architecture Rules
 
 - Read `docs/IMPLEMENTATION_PLAN.md` before continuing. Distinguish implemented behaviour from planned work using code and test evidence.
 - Keep project documentation under docs and college/review materials under collegedocs, except this root AGENTS.md. Do not move vendor documentation in node_modules.
-- The two-tenant limit applies to the actual backend lab infrastructure, not the portal UI. The UI supports arbitrary tenants, starts empty, and offers an explicit Load demo action for College/Hospital sample data. Keep three workload templates and deploy/inspect/stop/delete. Mobile, extensive lifecycle controls, and publication commitments are deferred.
+- The single-node lab runs at most five live shops (`SECURECLOUD_SHOP_QUOTA`, default 5, counting the two testbed shops); the quota is enforced server-side, and the UI explains it instead of failing. The portal UI supports arbitrary tenants. The attack testbed (`/lab`) stays on the fixed Northstar/Bloom/ShipFast topology so results are repeatable. Keep three workload templates and deploy/inspect/stop/delete. Mobile, extensive lifecycle controls, and publication commitments are deferred.
 - Require authenticated tenant authorization before adding portal mutations. The loopback observer is not the production API.
 - Never infer enforcement from a timeout, policy existence, or readiness. Retain unknown/inconclusive states and record positive controls.
 - Use identical static policies as the evaluation baseline. Demonstrate withdrawal of a compromised source's previously allowed access and measure disruption.
