@@ -29,6 +29,8 @@ print(int(last))
 PY
 )
 now=$(date +%s); boot=$(( now - up )); (( last > boot )) || last=${boot}
+# An install or update counts as activity, so a fresh access log never triggers an instant shutdown.
+reset=$(stat -c %Y /var/lib/securecloud/idle-reset 2>/dev/null || echo 0); (( last > reset )) || last=${reset}
 idle_for=$(( (now - last) / 60 ))
 if (( idle_for < IDLE )); then exit 0; fi
 

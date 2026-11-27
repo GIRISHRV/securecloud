@@ -137,6 +137,7 @@ chmod +x "${APP}"/deploy/bin/*.sh "${APP}"/backend/manifests/lab/*.sh
 systemctl daemon-reload
 systemctl enable --now securecloud-hubble-relay securecloud-hubble-capture securecloud-shop-forwards securecloud-api
 systemctl restart securecloud-api
+touch "${DATA}/idle-reset"   # restart the idle clock on every install/update
 systemctl enable --now securecloud-idle.timer   # no-op unless the VM has a managed identity allowed to deallocate itself
 
 step "Caddy (HTTPS with an automatic Let's Encrypt certificate)"
