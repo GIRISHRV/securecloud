@@ -52,5 +52,7 @@ unset token
 
 KUBECONFIG="${OUTPUT_PATH}" k3s kubectl auth can-i create deployments.apps --all-namespaces | grep -qx yes
 KUBECONFIG="${OUTPUT_PATH}" k3s kubectl auth can-i create secrets --all-namespaces | grep -qx yes
-KUBECONFIG="${OUTPUT_PATH}" k3s kubectl auth can-i get secrets --all-namespaces | grep -qx no
+# can-i exits non-zero when the answer is "no", so read its output instead of its status.
+answer="$(KUBECONFIG="${OUTPUT_PATH}" k3s kubectl auth can-i get secrets --all-namespaces 2>/dev/null || true)"
+[[ "${answer}" == "no" ]] || { echo "Backend credential can read secrets cluster-wide; refusing." >&2; exit 1; }
 echo "SecureCloud backend kubeconfig created with restricted RBAC."
