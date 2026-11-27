@@ -58,6 +58,8 @@ The target demonstrator is a multi-shop mall: two fixed testbed shops (Northstar
 - Use only isolated, project-owned labs and synthetic attack traffic.
 - Do not run scans, containment actions, or other tests against external systems.
 - Do not hard-code tokens, passwords, keys, or service credentials in source or documentation.
+  The single exception is the public guest reviewer login in README.md: it is published on purpose,
+  limited server-side (no shop changes, no merchant PII, containment limited to the testbed), and generated on the server.
 
 ## Kokonut UI
 
