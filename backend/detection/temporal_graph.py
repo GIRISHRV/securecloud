@@ -32,6 +32,7 @@ class WorkloadDescriptor:
     template: str
     running: bool = True
     quarantined: bool = False
+    created: float = 0.0  # when the workload was provisioned; 0 means long-established
 
 
 @dataclass(frozen=True)

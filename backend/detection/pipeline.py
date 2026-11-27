@@ -7,7 +7,7 @@ from pathlib import Path
 
 from backend.telemetry.schema import NormalizedFlow
 from backend.telemetry.windows import build_graph_snapshots
-from backend.detection.volume import expected_rates, volume_spike
+from backend.detection.volume import expected_rates, volume_spike, warming_up
 
 from .edge_frequency import EdgeFrequencyBaseline
 from .temporal_graph import (
@@ -253,7 +253,16 @@ class TemporalGraphDetectionPipeline:
             return ()
         engine = self._engine(workloads, approved_edges)
         hidden = engine.prime(history)
-        usual_rates = expected_rates(history)
+        created = {item.id: item.created for item in workloads}
+        described = {item.id: item for item in workloads}
+
+        def template_intent(source: str, destination: str) -> bool:
+            """Same-tenant web->api / api->database: the shop template's own declared paths. A new
+            shop's pods serve traffic seconds before they are marked running (and approved)."""
+            left, right = described.get(source), described.get(destination)
+            return bool(left and right and left.tenant_id == right.tenant_id
+                        and (left.template, right.template) in {("web", "api"), ("api", "database")})
+        usual_rates = expected_rates(history, created)
         baseline = EdgeFrequencyBaseline(
             anomaly_threshold=max(0.000_001, float(engine.threshold))
         )
@@ -298,13 +307,24 @@ class TemporalGraphDetectionPipeline:
                     "horizontal_fanout": len(source_destinations[edge.source_id]) >= 3,
                     "vertical_port_fanout": len(source_ports[edge.source_id]) >= 3,
                     # A normally quiet approved path suddenly carrying a burst (see detection.volume).
+                    # Not for a newly provisioned workload: it has no usual rate yet (see WARMUP_SECONDS).
                     "volume_spike": (edge.source_id, edge.destination_id) in approved_edges
+                    and not warming_up((edge.source_id, edge.destination_id), created, snapshot.window_start)
                     and volume_spike(edge.flow_count, usual_rates.get((edge.source_id, edge.destination_id), 0.0)),
                 }
                 if not matching:
                     continue
+                learned = score.anomaly_score
+                # Cold start: a just-provisioned workload has no temporal history, so the link
+                # predictor's novelty for it is undefined, not evidence. Its approved, undenied paths
+                # (the template's declared intents) do not contribute novelty during the warm-up;
+                # anything unapproved, denied or cross-tenant still carries the fact-based floors.
+                declared = (edge.source_id, edge.destination_id) in approved_edges or template_intent(edge.source_id, edge.destination_id)
+                if (warming_up((edge.source_id, edge.destination_id), created, snapshot.window_start)
+                        and declared and not edge.denied_count):
+                    learned = 0.0
                 # Risk is the higher of the link score and the volume rule.
-                anomaly = max(score.anomaly_score, 1.0 if facts["volume_spike"] else 0.0)
+                anomaly = max(learned, 1.0 if facts["volume_spike"] else 0.0)
                 prior = accumulated_by_source.get(edge.source_id, anomaly)
                 accumulated = (
                     self.ewma_alpha * anomaly

@@ -40,6 +40,7 @@ class Scenario:
     checkout: bool = False     # place one real Northstar order instead of TCP probes
     restart_source: bool = False  # replace the source pod (rollout restart) before probing
     tags: tuple[str, ...] = field(default_factory=tuple)
+    mitre: tuple[tuple[str, str], ...] = ()  # MITRE ATT&CK technique id and name
 
 
 NS, BL, PL = "northstar-shop-stack", "bloom-shop-stack", "platform-stack"
@@ -58,6 +59,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         id="plugin-valid-path-burst",
+        mitre=(("T1530", "Data from Cloud Storage"),),
         title="Plugin misuses its valid access",
         kind="attack",
         summary="The hacked ShipFast plugin hammers the Northstar order API it is allowed to use: 60 connections in a few seconds, like bulk-downloading every order.",
@@ -69,6 +71,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         id="plugin-lateral-movement",
+        mitre=(("T1210", "Exploitation of Remote Services"), ("T1021", "Remote Services")),
         title="Plugin attacks the other shop",
         kind="attack",
         summary="The hacked ShipFast plugin tries Bloom's storefront, order API and database, Northstar's own database, and the shared payment and email services. It was given none of them.",
@@ -87,6 +90,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         id="plugin-port-scan",
+        mitre=(("T1046", "Network Service Discovery"),),
         title="Plugin port-scans the order API",
         kind="attack",
         summary="The plugin dials common ports on the Northstar order API pod directly, bypassing its Service.",
@@ -119,6 +123,7 @@ EXFIL_HOST = "203.0.113.10"
 SCENARIOS = SCENARIOS + (
     Scenario(
         id="bloom-attacks-northstar",
+        mitre=(("T1210", "Exploitation of Remote Services"),),
         title="Bloom attacks Northstar",
         kind="attack",
         summary="A hacked Bloom order API tries Northstar's order API, database, storefront and its installed plugin.",
@@ -135,6 +140,7 @@ SCENARIOS = SCENARIOS + (
     ),
     Scenario(
         id="data-exfiltration",
+        mitre=(("T1048", "Exfiltration Over Alternative Protocol"),),
         title="Steal data out of the cluster",
         kind="attack",
         summary="A hacked Northstar order API tries to send data to an outside server (a reserved test address that is never routed).",
@@ -149,6 +155,7 @@ SCENARIOS = SCENARIOS + (
     ),
     Scenario(
         id="network-sweep",
+        mitre=(("T1046", "Network Service Discovery"), ("T1018", "Remote System Discovery")),
         title="Plugin sweeps the network",
         kind="attack",
         summary="The hacked plugin tries every service in both shops and the shared platform, one connection each.",
@@ -178,6 +185,30 @@ SCENARIOS = SCENARIOS + (
         probes=(Probe(NS, "northstar-api", 8080, count=3, expect="either", direct_pod_ip=True, label="New pod → order API"),),
         restart_source=True,
         tags=("Verification", "Pod replacement"),
+    ),
+    Scenario(
+        id="cloud-metadata",
+        title="Plugin reads cloud metadata",
+        kind="attack",
+        summary="The hacked plugin tries the cloud instance-metadata address, where real clouds hand out machine credentials.",
+        what_to_watch="Default-deny egress should DROP it: no workload may reach the metadata endpoint.",
+        source_stack=NS,
+        source_service="shipfast-plugin",
+        probes=(Probe(NS, "metadata", 80, expect="blocked", label="Instance metadata", external_host="169.254.169.254"),),
+        tags=("credential access", "egress"),
+        mitre=(("T1552.005", "Cloud Instance Metadata API"),),
+    ),
+    Scenario(
+        id="reach-control-plane",
+        title="Plugin reaches the Kubernetes API",
+        kind="attack",
+        summary="The hacked plugin dials the cluster's API server, the usual next step for stealing a service-account token.",
+        what_to_watch="Default-deny egress should DROP it. If Hubble shows no matching flow, the result stays inconclusive.",
+        source_stack=NS,
+        source_service="shipfast-plugin",
+        probes=(Probe(NS, "kubernetes-api", 443, expect="blocked", label="Kubernetes API", external_host="10.43.0.1"),),
+        tags=("credential access", "control plane"),
+        mitre=(("T1613", "Container and Resource Discovery"), ("T1528", "Steal Application Access Token")),
     ),
 )
 

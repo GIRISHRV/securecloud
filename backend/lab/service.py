@@ -131,6 +131,7 @@ class LabService:
             {
                 "id": s.id, "title": s.title, "kind": s.kind, "summary": s.summary,
                 "what_to_watch": s.what_to_watch, "tags": list(s.tags),
+                "mitre": [{"id": tid, "name": name} for tid, name in s.mitre],
                 "source": s.source_service,
                 "targets": sorted({p.target_service for p in s.probes}) or (["northstar-api"] if s.checkout else []),
             }
@@ -225,6 +226,7 @@ class LabService:
                 steps, result = self._run_checkout(run_id, namespace, source)
             else:
                 steps, result = self._run_probes(run_id, scenario, namespace, source)
+                result["protection"] = self.protection
             self._save(run_id, status="completed", finished_at=self.clock(), steps=steps, result=result)
             self._log(run_id, "info", f"run complete in {self.clock() - started:.1f}s · waiting for the detector to score the traffic")
         except (InfrastructureError, LabUnavailable, ValueError) as exc:
@@ -326,6 +328,8 @@ class LabService:
         result["order_id"] = order["order_number"]
         result["order_complete"] = bool(mirror.get("ok"))
         result["platform_order_id"] = platform.get("order_id")
+        result["order_ms"] = mirror.get("ms")      # for the policy-overhead metric (on vs off)
+        result["protection"] = self.protection
         return steps, result
 
     def _observe(self, run_id, steps, source_id: str, sent_at: float, downstream_tenant: str | None = None):
