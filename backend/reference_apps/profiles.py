@@ -167,6 +167,8 @@ def _shop_profile(profile_id: str, name: str, description: str) -> ProfileSpec:
 PROFILES.update({
     "northstar": _shop_profile("northstar", "Northstar", "Northstar bags and everyday carry: order service."),
     "bloom": _shop_profile("bloom", "Bloom Candles", "Bloom hand-poured candles: storefront and orders."),
+    # Generic order service for every shop created from the SecureCloud shop template.
+    "shop": _shop_profile("shop", "Shop", "A merchant shop created from the SecureCloud shop template."),
     "shipfast": ProfileSpec(
         id="shipfast",
         name="ShipFast",

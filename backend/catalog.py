@@ -190,4 +190,49 @@ def catalog_response(deployable_stack_ids: frozenset[str] = frozenset()) -> dict
 
 
 def stack_definition(stack_id: str) -> StackDefinition | None:
-    return next((stack for stack in STACK_DEFINITIONS if stack.id == stack_id), None)
+    return next((stack for stack in STACK_DEFINITIONS if stack.id == stack_id), None) or _TEMPLATE_STACKS.get(stack_id)
+
+
+# --- Shop template ---------------------------------------------------------------------------
+# Every merchant shop is an instance of one allowlisted template: storefront, order API and
+# database with bounded resources. Only the slug varies; it names the stack and its workloads,
+# so a merchant never supplies images, YAML or service names.
+SHOP_TEMPLATE_PROFILE = "shop"
+SHOP_TEMPLATE_VERSION = "securecloud-shop-template-v1"
+LEGACY_SHOP_STACKS = ("northstar-shop-stack", "bloom-shop-stack")  # the testbed's fixed shops
+_TEMPLATE_STACKS: dict[str, StackDefinition] = {}
+
+
+def shop_stack_id(slug: str) -> str:
+    return f"shop-{slug}"
+
+
+def register_shop_stack(slug: str, name: str) -> StackDefinition:
+    """Register (idempotently) the stack definition for one template shop."""
+    stack_id = shop_stack_id(slug)
+    definition = StackDefinition(
+        id=stack_id,
+        name=f"{name} shop",
+        description=f"{name}: storefront, order API and database from the SecureCloud shop template.",
+        version=SHOP_TEMPLATE_VERSION,
+        status="validated",
+        deployment_enabled=False,
+        workflow="Orders flow storefront → order API → database, then settle with the shared platform.",
+        services=(
+            StackService(f"{slug}-web", "web", 80, (f"{slug}-api",)),
+            StackService(f"{slug}-api", "api", 8080, (f"{slug}-database",)),
+            StackService(f"{slug}-database", "database", 5432),
+        ),
+    )
+    _TEMPLATE_STACKS[stack_id] = definition
+    SHOP_STACKS[stack_id] = (SHOP_TEMPLATE_PROFILE, slug)
+    return definition
+
+
+def shop_stack_ids() -> tuple[str, ...]:
+    """Every stack that is a shop (fixed testbed shops plus template shops), excluding the platform."""
+    return LEGACY_SHOP_STACKS + tuple(_TEMPLATE_STACKS)
+
+
+def is_shop_stack(stack_id: str | None) -> bool:
+    return stack_id in LEGACY_SHOP_STACKS or stack_id in _TEMPLATE_STACKS

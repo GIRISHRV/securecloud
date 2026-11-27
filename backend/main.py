@@ -23,6 +23,7 @@ settings = Settings(
     secure_cookie=False,  # Allow loopback development cookies
     session_seconds=86400,
     tenant_limit=int(os.environ.get("SECURECLOUD_TENANT_LIMIT", "2")),
+    shop_quota=int(os.environ.get("SECURECLOUD_SHOP_QUOTA", "5")),
     infrastructure=os.environ.get("SECURECLOUD_INFRASTRUCTURE", "disabled"),
     kubeconfig=Path(os.environ["SECURECLOUD_KUBECONFIG"]) if os.environ.get("SECURECLOUD_KUBECONFIG") else None,
     kube_api=os.environ.get("SECURECLOUD_KUBE_API"),

@@ -6,7 +6,7 @@ from pathlib import Path
 import secrets
 from typing import Mapping
 
-from backend.catalog import PLATFORM_PROFILES, PLATFORM_TENANT_ID, PLUGIN_PROFILES, SHOP_STACKS, stack_definition
+from backend.catalog import LEGACY_SHOP_STACKS, PLATFORM_PROFILES, PLATFORM_TENANT_ID, PLUGIN_PROFILES, SHOP_STACKS, is_shop_stack, stack_definition
 from backend.experiments.retail_spike import prepare_documents
 
 from .base import (
@@ -42,8 +42,8 @@ TEMPLATES = {
 }
 
 REFERENCE_PROFILES = {"college", "hospital"}
-SHOP_PROFILES = {"northstar", "bloom", "shipfast", "orderids", "payments", "email"}
-SHOP_IMAGE = "docker.io/securecloud/reference-api:0.5.0"
+SHOP_PROFILES = {"northstar", "bloom", "shop", "shipfast", "orderids", "payments", "email"}
+SHOP_IMAGE = "docker.io/securecloud/reference-api:0.6.0"  # 0.6.0 adds the generic "shop" profile
 NOT_PLUGIN = {"key": "securecloud.io/role", "operator": "NotIn", "values": ["plugin"]}
 REFERENCE_SECRET = "securecloud-reference-db"
 
@@ -722,8 +722,10 @@ class KubernetesInfrastructure:
             if role in {"plugin", "platform"}:  # stateless services: no database credentials
                 container["env"] = [{"name": "APP_PROFILE", "value": reference_profile},
                                     {"name": "APP_STORAGE", "value": "memory"}]
-            elif reference_profile in {"northstar", "bloom"}:  # shop order APIs settle through the platform zone
+            elif reference_profile in {"northstar", "bloom", "shop"}:  # shop order APIs settle through the platform zone
                 container["env"].append({"name": "PLATFORM_NAMESPACE", "value": tenant_namespace(PLATFORM_TENANT_ID)})
+                if reference_profile == "shop" and api_upstream:  # template shops: identity from the slug
+                    container["env"].append({"name": "SHOP_ID", "value": api_upstream.removesuffix("-api")})
             return container, pod_security_context, []
 
         pod_security_context.update({"runAsUser": 70, "runAsGroup": 70, "fsGroup": 70})
@@ -838,6 +840,11 @@ class KubernetesInfrastructure:
         }
         if purpose:
             labels["securecloud.io/purpose"] = purpose
+        # Template (merchant) shops only: the platform admits them by this label, and it is the only
+        # label under which the backend may delete a namespace. The fixed testbed shops are admitted
+        # by their purpose instead, so they can never become deletable.
+        if is_shop_stack(purpose) and purpose not in LEGACY_SHOP_STACKS:
+            labels["securecloud.io/kind"] = "shop"
         body = {
             "apiVersion": "v1",
             "kind": "Namespace",
@@ -854,6 +861,181 @@ class KubernetesInfrastructure:
             force=True,
             _content_type=APPLY_CONTENT_TYPE,
         )
+
+    def service_request(self, tenant_id: str, service: str, port: int, path: str, *,
+                        method: str = "GET", payload: dict | None = None, timeout: float = 5.0) -> tuple[int, bytes]:
+        """Call a tenant service through the Kubernetes API service proxy (no port-forward).
+
+        The request enters the cluster at the service, so the shop's own web -> API -> database
+        hops are ordinary pod traffic that Cilium enforces and Hubble records.
+        """
+        resource = f"/api/v1/namespaces/{tenant_namespace(tenant_id)}/services/{service}:{port}/proxy/{path.lstrip('/')}"
+        try:
+            result = self.core.api_client.call_api(
+                resource, method,
+                header_params={"Content-Type": "application/json", "Accept": "application/json"},
+                body=payload,
+                auth_settings=["BearerToken"], _preload_content=False, _request_timeout=timeout,
+            )
+            # Client versions differ: some return the raw response, others (data, status, headers).
+            response = result[0] if isinstance(result, tuple) else result
+            return response.status, response.data
+        except self.ApiException as exc:
+            return exc.status or 0, (exc.body or b"") if isinstance(exc.body, bytes) else str(exc.body or "").encode()
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
+    # ----------------------------------------------------------------------------------- tenant views
+    def _sanitize(self, obj) -> dict:
+        data = self.core.api_client.sanitize_for_serialization(obj)
+        (data.get("metadata") or {}).pop("managedFields", None)
+        return data
+
+    def live_policies(self, tenant_id: str) -> list[dict]:
+        """The network policies actually applied in a tenant namespace, read back from the API server."""
+        namespace = tenant_namespace(tenant_id)
+        try:
+            documents = [self._sanitize(item) for item in self.networking.list_namespaced_network_policy(namespace).items]
+            try:
+                cilium = self.custom.list_namespaced_custom_object("cilium.io", "v2", namespace, "ciliumnetworkpolicies")
+                for item in cilium.get("items", []):
+                    (item.get("metadata") or {}).pop("managedFields", None)
+                    documents.append(item)
+            except self.ApiException as exc:
+                if exc.status not in (403, 404):
+                    raise
+            for item in documents:
+                item.setdefault("apiVersion", "networking.k8s.io/v1")
+                item.setdefault("kind", "NetworkPolicy")
+            return sorted(documents, key=lambda item: (item["kind"], item["metadata"]["name"]))
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
+    def quota_usage(self, tenant_id: str) -> dict:
+        """Used vs hard limits of the tenant's ResourceQuota (pods, CPU and memory requests/limits)."""
+        try:
+            quota = self.core.read_namespaced_resource_quota("securecloud-quota", tenant_namespace(tenant_id))
+            hard, used = quota.status.hard or {}, quota.status.used or {}
+            return {key: {"used": used.get(key, "0"), "hard": hard[key]} for key in sorted(hard)}
+        except self.ApiException as exc:
+            if exc.status == 404:
+                return {}
+            raise self._translate(exc) from exc
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
+    def posture(self, tenant_id: str) -> list[dict]:
+        """Hardening checks for one tenant, read from the live cluster. Each check names the
+        CIS Kubernetes Benchmark / NSA-CISA hardening guidance it follows. Not a full benchmark scan."""
+        namespace = tenant_namespace(tenant_id)
+        try:
+            ns = self.core.read_namespace(namespace)
+            labels = ns.metadata.labels or {}
+            policies = self.networking.list_namespaced_network_policy(namespace).items
+            deployments = self.apps.list_namespaced_deployment(namespace).items
+            try:
+                self.core.read_namespaced_resource_quota("securecloud-quota", namespace)
+                quota = True
+            except self.ApiException as exc:
+                if exc.status != 404:
+                    raise
+                quota = False
+        except Exception as exc:
+            raise self._translate(exc) from exc
+        containers, pods = [], []
+        for deployment in deployments:
+            spec = deployment.spec.template.spec
+            pods.append((deployment.metadata.name, spec))
+            for container in spec.containers:
+                containers.append((deployment.metadata.name, container, spec))
+
+        def every(predicate):
+            failing = sorted({name for name, container, spec in containers if not predicate(container, spec)})
+            return not failing and bool(containers), failing
+
+        def sc(container):
+            return container.security_context
+
+        def pod_sc(spec):
+            return spec.security_context
+
+        checks = []
+
+        def add(check_id, title, refs, passed, failing=()):
+            checks.append({"id": check_id, "title": title, "refs": refs, "passed": bool(passed), "failing": list(failing)})
+
+        add("default-deny", "Default-deny network policy", ["CIS 5.3.2", "NSA-CISA: network separation"],
+            any(p.metadata.name == "default-deny" and not (p.spec.pod_selector.match_labels or p.spec.pod_selector.match_expressions) for p in policies))
+        add("pod-security", "Restricted Pod Security Standard enforced", ["CIS 5.2", "NSA-CISA: pod security"],
+            labels.get("pod-security.kubernetes.io/enforce") == "restricted")
+        add("quota", "Resource quota on the namespace", ["NSA-CISA: resource policies"], quota)
+        passed, failing = every(lambda c, spec: bool((sc(c) and sc(c).run_as_non_root) or (pod_sc(spec) and pod_sc(spec).run_as_non_root)))
+        add("non-root", "Containers run as non-root", ["CIS 5.2.6", "NSA-CISA: non-root containers"], passed, failing)
+        passed, failing = every(lambda c, spec: bool(sc(c) and sc(c).allow_privilege_escalation is False))
+        add("no-escalation", "Privilege escalation disabled", ["CIS 5.2.5"], passed, failing)
+        passed, failing = every(lambda c, spec: bool(sc(c) and sc(c).capabilities and "ALL" in (sc(c).capabilities.drop or [])))
+        add("drop-caps", "All Linux capabilities dropped", ["CIS 5.2.7", "CIS 5.2.9"], passed, failing)
+        passed, failing = every(lambda c, spec: bool(sc(c) and sc(c).read_only_root_filesystem))
+        add("read-only-fs", "Read-only root filesystem", ["NSA-CISA: immutable filesystems"], passed, failing)
+        passed, failing = every(lambda c, spec: bool(c.resources and c.resources.limits and "cpu" in c.resources.limits and "memory" in c.resources.limits))
+        add("limits", "CPU and memory limits set", ["NSA-CISA: resource limits"], passed, failing)
+        passed, failing = every(lambda c, spec: ":" in c.image.rsplit("/", 1)[-1] and not c.image.endswith(":latest"))
+        add("pinned-images", "Images pinned to a version (no :latest)", ["NSA-CISA: image hygiene"], passed, failing)
+        passed, failing = every(lambda c, spec: bool((pod_sc(spec) and pod_sc(spec).seccomp_profile and pod_sc(spec).seccomp_profile.type == "RuntimeDefault")
+                                                     or (sc(c) and sc(c).seccomp_profile and sc(c).seccomp_profile.type == "RuntimeDefault")))
+        add("seccomp", "Seccomp RuntimeDefault profile", ["CIS 5.7.2"], passed, failing)
+        failing = sorted({name for name, spec in pods if spec.host_network or spec.host_pid or spec.host_ipc})
+        add("host-namespaces", "No host network, PID or IPC", ["CIS 5.2.2", "CIS 5.2.3", "CIS 5.2.4"], not failing and bool(pods), failing)
+        failing = sorted({name for name, spec in pods if spec.automount_service_account_token is not False})
+        add("no-sa-token", "Service-account token not mounted", ["CIS 5.1.6"], not failing and bool(pods), failing)
+        return checks
+
+    def scale_shop(self, tenant_id: str, replicas: int) -> str:
+        """Pause (0) or resume (1) a shop's workloads; "done" only once the cluster shows it.
+        Labels, including any quarantine label, are never touched."""
+        namespace = tenant_namespace(tenant_id)
+        try:
+            pending = False
+            for deployment in self.apps.list_namespaced_deployment(namespace, label_selector="app.kubernetes.io/managed-by=securecloud").items:
+                if (deployment.spec.replicas or 0) != replicas:
+                    self.apps.patch_namespaced_deployment(deployment.metadata.name, namespace, {"spec": {"replicas": replicas}})
+                    pending = True
+                    continue
+                current, ready = deployment.status.replicas or 0, deployment.status.ready_replicas or 0
+                if (replicas == 0 and current > 0) or (replicas > 0 and ready < replicas):
+                    pending = True
+            return "pending" if pending else "done"
+        except Exception as exc:
+            raise self._translate(exc) from exc
+
+    def delete_shop_namespace(self, tenant_id: str) -> str:
+        """Delete one shop tenant's namespace. Returns "deleting" until Kubernetes confirms it is gone.
+
+        Refuses unless the namespace really is that shop: SecureCloud-managed, kind=shop, and
+        annotated with the same tenant id. Deletes with a UID precondition (never force). A cluster
+        ValidatingAdmissionPolicy enforces the same managed/kind=shop rule server-side.
+        """
+        namespace = tenant_namespace(tenant_id)
+        try:
+            try:
+                current = self.core.read_namespace(namespace)
+            except self.ApiException as exc:
+                if exc.status == 404:
+                    return "deleted"
+                raise
+            labels = current.metadata.labels or {}
+            annotations = current.metadata.annotations or {}
+            if (labels.get("app.kubernetes.io/managed-by") != "securecloud" or labels.get("securecloud.io/kind") != "shop"
+                    or annotations.get("securecloud.io/tenant-id") != tenant_id):
+                raise InfrastructureConflict("Namespace identity does not match this shop")
+            if current.metadata.deletion_timestamp is None:
+                self.core.delete_namespace(namespace, body=self.client.V1DeleteOptions(
+                    preconditions=self.client.V1Preconditions(uid=current.metadata.uid), propagation_policy="Foreground"))
+            return "deleting"
+        except InfrastructureError:
+            raise
+        except Exception as exc:
+            raise self._translate(exc) from exc
 
     def set_protection(self, enabled: bool, namespaces: list[str]) -> None:
         """Apply (enabled) or remove (disabled) every SecureCloud tenant network policy."""
@@ -921,8 +1103,14 @@ class KubernetesInfrastructure:
             }),
             policy("platform-from-shops", {
                 "podSelector": {"matchLabels": {"securecloud.io/role": "platform"}}, "policyTypes": ["Ingress"],
-                "ingress": [{"from": [{"namespaceSelector": {"matchExpressions": [{"key": "securecloud.io/purpose", "operator": "In", "values": ["northstar-shop-stack", "bloom-shop-stack"]}]},
-                                       "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}}], "ports": [{"protocol": "TCP", "port": 8080}]}],
+                # Any shop namespace (kind=shop); the fixed testbed shops are also matched by purpose so
+                # they keep access even before their namespace picks up the new label.
+                "ingress": [{"from": [
+                    {"namespaceSelector": {"matchLabels": {"securecloud.io/kind": "shop"}},
+                     "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}},
+                    {"namespaceSelector": {"matchExpressions": [{"key": "securecloud.io/purpose", "operator": "In", "values": list(LEGACY_SHOP_STACKS)}]},
+                     "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}},
+                ], "ports": [{"protocol": "TCP", "port": 8080}]}],
             }),
             policy("api-from-plugin", {
                 "podSelector": {"matchLabels": {"securecloud.io/template": "api"}, "matchExpressions": [NOT_PLUGIN]}, "policyTypes": ["Ingress"],

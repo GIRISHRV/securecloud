@@ -19,6 +19,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install --yes --no-install-recommends ca-certificates curl
 
+# Must run before K3s starts so kubelet never hands pods the WSL resolver.
+"$(dirname "${BASH_SOURCE[0]}")/pin-cluster-dns.sh"
+
 if command -v k3s >/dev/null 2>&1; then
   installed_k3s_version="$(k3s --version | awk 'NR == 1 {print $3}')"
   if [[ "${installed_k3s_version}" != "${K3S_VERSION}" ]]; then

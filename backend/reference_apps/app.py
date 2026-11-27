@@ -89,7 +89,8 @@ def create_reference_app(
         resource = require_resource(resource_id)
         record = records.create(resource_id, validate_payload(resource, body)).to_dict()
         if resource_id == "orders" and os.environ.get("PLATFORM_NAMESPACE"):
-            record["platform"] = settle_with_platform(profile.id, record)
+            # Template shops share one profile, so their identity comes from SHOP_ID.
+            record["platform"] = settle_with_platform(os.environ.get("SHOP_ID", profile.id), record)
         return record
 
     @app.put("/api/resources/{resource_id}/{record_id}")

@@ -22,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .catalog import catalog_response, stack_definition
+from .shops import ShopError, ShopRegistry, ShopRequest
+from .retail.store import RetailError
+from .retail_seed import BLOOM_CATALOG
 from .store import Store, audit
 from .detection import (
     DenialBurstBaseline,
@@ -48,6 +51,7 @@ class Settings:
     secure_cookie: bool = True
     session_seconds: int = 3600
     tenant_limit: int = 2
+    shop_quota: int = 5  # live shops the single-node lab may run (template shops + testbed shops)
     infrastructure: Literal["disabled", "kubernetes"] = "disabled"
     kubeconfig: Path | None = None
     kube_api: str | None = None
@@ -65,7 +69,7 @@ class Settings:
             raise ValueError("Secure sessions require HTTPS")
         if not self.secure_cookie and parsed.hostname not in {"127.0.0.1", "localhost", "testserver"}:
             raise ValueError("Insecure cookies are restricted to loopback development")
-        if self.session_seconds <= 0 or self.tenant_limit <= 0:
+        if self.session_seconds <= 0 or self.tenant_limit <= 0 or not 1 <= self.shop_quota <= 20:
             raise ValueError("Invalid session or tenant limits")
         if self.infrastructure not in {"disabled", "kubernetes"}:
             raise ValueError("Infrastructure must be disabled or kubernetes")
@@ -215,6 +219,14 @@ def create_app(settings: Settings) -> FastAPI:
                         urllib.request.urlopen(url, timeout=3).read()
                     except Exception:
                         pass
+                registry = getattr(app.state, "shops", None)
+                for shop in (registry.shops() if registry else []):
+                    if shop["fixed"] or not shop["tenant_id"] or shop["status"] != "active":
+                        continue
+                    try:  # template shops have no port-forward: go through the Kubernetes API proxy
+                        infrastructure.service_request(shop["tenant_id"], f"{shop['slug']}-web", 80, "/api/resources/products", timeout=3)
+                    except Exception:
+                        pass
                 time.sleep(4)
         threading.Thread(target=browse_loop, name="background-shoppers", daemon=True).start()
     if infrastructure is not None:  # always start protected, even if a demo left SecureCloud off
@@ -226,6 +238,9 @@ def create_app(settings: Settings) -> FastAPI:
                 store.reconcile_operations()
                 store.reconcile_stack_operations()
                 store.reconcile_containment_requests()
+                if getattr(app.state, "shops", None) is not None:
+                    app.state.shops.reconcile_deletions(infrastructure)
+                    app.state.shops.reconcile_lifecycle(infrastructure)
             except Exception:
                 logger.exception("Infrastructure reconciliation iteration failed")
             stop_reconciler.wait(2.0)
@@ -293,7 +308,11 @@ def create_app(settings: Settings) -> FastAPI:
                     for event in store.get_normalized_traffic(limit=1_000, window_seconds=600)
                 }
                 flows_by_id = {flow.event_id: flow for flow in recent_flows}
+                registry = getattr(app.state, "shops", None)
                 for finding in findings:
+                    mode = registry.mode_for_tenant(finding.source_tenant) if registry else "monitor"
+                    if mode == "learn":  # still learning this shop's normal: score it, but open no incident
+                        continue
                     evidence = [
                         evidence_by_id[event_id]
                         for event_id in finding.event_ids
@@ -303,9 +322,25 @@ def create_app(settings: Settings) -> FastAPI:
                         evidence = [flow_evidence(flows_by_id[event_id]) for event_id in finding.event_ids[:50] if event_id in flows_by_id]
                     if evidence and store.record_detection_finding(finding, evidence):
                         new_findings += 1
+                    if mode == "protect" and finding.response == "containment-recommended":
+                        auto_contain(finding)
                 telemetry_status.update(findings=telemetry_status["findings"] + new_findings)
             except Exception:
                 logger.exception("Graph analysis failed")
+
+    def auto_contain(finding):
+        """Protect mode: isolate a corroborated source through the same audited, verified path an
+        operator uses. Only an open alert is isolated, and only once."""
+        with store.connect() as db:
+            row = db.execute("""SELECT i.id FROM incidents i LEFT JOIN containment_requests c ON c.incident_id=i.id
+                                WHERE i.source_id=? AND i.status='alert' AND c.incident_id IS NULL
+                                ORDER BY i.created_at DESC LIMIT 1""", (finding.source_id,)).fetchone()
+        if row is None:
+            return
+        try:
+            store.request_containment(row[0], "quarantine", "system.protect-mode")
+        except ValueError:
+            logger.info("Protect mode could not isolate %s", finding.source_id)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -375,11 +410,13 @@ def create_app(settings: Settings) -> FastAPI:
                 return JSONResponse({"detail": "Untrusted request origin"}, status_code=403)
             if request.headers.get("content-type", "").split(";")[0] != "application/json":
                 return JSONResponse({"detail": "JSON required"}, status_code=415)
+            # Product photo uploads carry a base64 image; every other body stays small.
+            limit = 4_500_000 if request.url.path.endswith("/admin/media") else 16384
             # Count actual received bytes rather than trusting Content-Length.
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > 16384:
+                if len(body) > limit:
                     return JSONResponse({"detail": "Request body too large"}, status_code=413)
             request._body = bytes(body)
         response = await call_next(request)
@@ -408,9 +445,329 @@ def create_app(settings: Settings) -> FastAPI:
         app.include_router(create_retail_router(retail_store, accounts=accounts, shop_id="northstar", prefix="/api/retail",
                                                 mode="shop", mirror_upstream="http://127.0.0.1:8094", **common))
         app.include_router(create_retail_router(bloom_store, accounts=accounts, shop_id="bloom", prefix="/api/bloom",
-                                                mode="shop", mirror_upstream="http://127.0.0.1:8095", **common))
+                                                mode="shop", mirror_upstream="http://127.0.0.1:8095", sample_catalog=BLOOM_CATALOG, **common))
         app.include_router(create_retail_router(retail_store, accounts=accounts, shop_id="securecloud", prefix="/api/provider",
                                                 mode="provider", **common))
+        # Every shop, fixed or self-service, is also served at /api/shops/{slug}/... by one dispatcher.
+        shops = ShopRegistry(accounts.path, cloud=store, accounts=accounts, retail_base=retail_database,
+                             quota=settings.shop_quota, fixed_stores={"northstar": retail_store, "bloom": bloom_store})
+        app.state.shops = shops
+        shop_apps: dict[str, FastAPI] = {}
+        fixed_upstreams = {"northstar": "http://127.0.0.1:8094", "bloom": "http://127.0.0.1:8095"}
+
+        def shop_app(slug: str) -> FastAPI | None:
+            shop = shops.get(slug)
+            if shop is None or shop["status"] != "active":  # removed or being removed
+                shop_apps.pop(slug, None)
+                return None
+            if slug in shop_apps:
+                return shop_apps[slug]
+            shop_store = shops.store(slug)
+            if shop is None or shop_store is None:
+                return None
+            if shop["fixed"]:
+                upstream = fixed_upstreams[slug]
+            elif infrastructure is not None and shop["tenant_id"]:
+                def upstream(path, payload, _tenant=shop["tenant_id"], _service=f"{slug}-web"):
+                    return infrastructure.service_request(_tenant, _service, 80, path, method="POST", payload=payload)
+            else:
+                upstream = None
+            sub = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+            sub.add_exception_handler(RequestValidationError, lambda request, exc: JSONResponse({"detail": "Validation error"}, status_code=422))
+            sub.add_exception_handler(HTTPException, lambda request, exc: JSONResponse({"detail": exc.detail}, status_code=exc.status_code))
+            sub.include_router(create_retail_router(shop_store, accounts=accounts, shop_id=slug, prefix="", mode="shop",
+                                                    mirror_upstream=upstream, media_base=f"/api/shops/{slug}",
+                                                    sample_catalog="default" if slug == "northstar" else BLOOM_CATALOG if slug == "bloom" else None, secure_cookie=settings.secure_cookie,
+                                                    session_seconds=settings.session_seconds, correlation_store=store, lab=None))
+            shop_apps[slug] = sub
+            return sub
+
+        async def shop_dispatch(scope, receive, send):
+            # Mount keeps the full path and moves the prefix into root_path; route on what follows it.
+            root = scope.get("root_path", "")
+            relative = scope.get("path", "")[len(root):] if scope.get("path", "").startswith(root) else scope.get("path", "")
+            slug = relative.lstrip("/").partition("/")[0]
+            sub = shop_app(slug) if scope["type"] == "http" else None
+            paused = shops.get(slug)
+            if sub is None and paused is not None and paused["status"] in ("pausing", "paused", "resuming"):
+                await JSONResponse({"detail": "This shop is paused by its owner"}, status_code=503)(scope, receive, send)
+                return
+            if sub is None:
+                await JSONResponse({"detail": "Shop not found"}, status_code=404)(scope, receive, send)
+                return
+            await sub(dict(scope, root_path=f"{root}/{slug}"), receive, send)
+
+        app.mount("/api/shops", shop_dispatch)
+
+        class ShopCreate(Body):
+            slug: str = Field(min_length=4, max_length=24)
+            name: str = Field(min_length=2, max_length=40)
+            tagline: str = Field(min_length=2, max_length=60)
+            hero_title: str = Field(min_length=2, max_length=60)
+            hero_text: str = Field(min_length=2, max_length=200)
+            theme: str = Field(min_length=2, max_length=20)
+            categories: list[str] = Field(min_length=1, max_length=6)
+
+        def merchant(request: Request, mutate: bool = False) -> dict:
+            token = request.cookies.get("__Host-retail" if settings.secure_cookie else "retail_dev")
+            row = accounts.resolve_session(token) if token else None
+            if not row:
+                raise HTTPException(401, "Sign in to create a shop")
+            if mutate and not secrets.compare_digest(request.headers.get("x-csrf-token", ""), row["csrf"]):
+                raise HTTPException(403, "CSRF verification failed")
+            return row
+
+        @app.get("/api/mall/shops")
+        def mall_shops():
+            return {"items": [shops.public(shop) for shop in shops.shops()], "quota": shops.usage()}
+
+        @app.get("/api/mall/shops/{slug}")
+        def mall_shop(slug: str):
+            shop = shops.get(slug)
+            if shop is None:
+                raise HTTPException(404, "Shop not found")
+            return shops.public(shop)
+
+        @app.get("/api/mall/me")
+        def mall_me(request: Request):
+            account = merchant(request)
+            owned = [shop for shop in shops.shops() if shop["owner_user_id"] == account["user_id"]]
+            return {"csrf": account["csrf"], "shops": [dict(shops.public(shop), status=shops.state(shop)) for shop in owned],
+                    "quota": shops.usage()}
+
+        @app.post("/api/mall/shops", status_code=202)
+        def mall_create(body: ShopCreate, request: Request):
+            account = merchant(request, mutate=True)
+            if infrastructure is None:
+                raise HTTPException(503, "Shop provisioning needs the Kubernetes lab")
+            try:
+                shop = shops.create(account, ShopRequest(**body.model_dump()))
+            except ShopError as exc:
+                raise HTTPException(exc.status, str(exc))
+            return dict(shops.public(shop), status=shops.state(shop))
+
+        def provider(request: Request, mutate: bool = False) -> dict:
+            account = merchant(request, mutate)
+            if accounts.role(account["user_id"], "securecloud") != "provider":
+                raise HTTPException(403, "Provider access required")
+            return account
+
+        class ShopRemoval(Body):
+            confirm: str = Field(min_length=1, max_length=24)
+
+        @app.get("/api/provider/admin/shops")
+        def provider_shops(request: Request):
+            provider(request)
+            return {"items": [shops.provider_view(shop) for shop in shops.shops()], "quota": shops.usage()}
+
+        @app.post("/api/provider/admin/shops/{slug}/remove", status_code=202)
+        def provider_remove(slug: str, body: ShopRemoval, request: Request):
+            account = provider(request, mutate=True)
+            try:
+                shop = shops.request_delete(slug, f"provider:{account['user_id']}", body.confirm)
+            except ShopError as exc:
+                raise HTTPException(exc.status, str(exc))
+            return shops.provider_view(shop)
+
+        class ShopMode(Body):
+            mode: Literal["learn", "monitor", "protect"]
+
+        class ShopConfirm(Body):
+            confirm: str = Field(min_length=1, max_length=24)
+
+        class StaffInvite(Body):
+            email: str = Field(min_length=5, max_length=254)
+
+        def shop_or_404(slug: str) -> dict:
+            shop = shops.get(slug)
+            if shop is None:
+                raise HTTPException(404, "Shop not found")
+            return shop
+
+        def manager(request: Request, slug: str, mutate: bool = False, owner_only: bool = False) -> tuple[dict, dict]:
+            """Shop owner or invited staff (owner_only: the owner alone, e.g. for team changes)."""
+            account, shop = merchant(request, mutate), shop_or_404(slug)
+            is_owner = shop["owner_user_id"] == account["user_id"]
+            if not is_owner and (owner_only or accounts.role(account["user_id"], slug) != "owner"):
+                raise HTTPException(404, "Shop not found")
+            return account, shop
+
+        def cluster_call(function, *args):
+            if infrastructure is None:
+                raise HTTPException(503, "The Kubernetes lab is not connected")
+            try:
+                return function(*args)
+            except Exception as exc:
+                raise HTTPException(503, f"Could not read the cluster: {exc}")
+
+        @app.post("/api/provider/admin/shops/{slug}/mode")
+        def provider_mode(slug: str, body: ShopMode, request: Request):
+            account = provider(request, mutate=True)
+            try:
+                return shops.provider_view(shops.set_mode(slug, body.mode, f"provider:{account['user_id']}"))
+            except ShopError as exc:
+                raise HTTPException(exc.status, str(exc))
+
+        @app.post("/api/provider/admin/shops/{slug}/pause", status_code=202)
+        def provider_pause(slug: str, body: ShopConfirm, request: Request):
+            return provider_lifecycle(slug, "pause", body, request)
+
+        @app.post("/api/provider/admin/shops/{slug}/resume", status_code=202)
+        def provider_resume(slug: str, body: ShopConfirm, request: Request):
+            return provider_lifecycle(slug, "resume", body, request)
+
+        def provider_lifecycle(slug: str, action: str, body: ShopConfirm, request: Request):
+            account = provider(request, mutate=True)
+            try:
+                return shops.provider_view(shops.request_lifecycle(slug, action, f"provider:{account['user_id']}", body.confirm))
+            except ShopError as exc:
+                raise HTTPException(exc.status, str(exc))
+
+        @app.post("/api/mall/shops/{slug}/pause", status_code=202)
+        def owner_pause(slug: str, body: ShopConfirm, request: Request):
+            return owner_lifecycle(slug, "pause", body, request)
+
+        @app.post("/api/mall/shops/{slug}/resume", status_code=202)
+        def owner_resume(slug: str, body: ShopConfirm, request: Request):
+            return owner_lifecycle(slug, "resume", body, request)
+
+        def owner_lifecycle(slug: str, action: str, body: ShopConfirm, request: Request):
+            account, _ = manager(request, slug, mutate=True, owner_only=True)
+            try:
+                return shops.public(shops.request_lifecycle(slug, action, f"merchant:{account['user_id']}", body.confirm))
+            except ShopError as exc:
+                raise HTTPException(exc.status, str(exc))
+
+        @app.get("/api/provider/admin/shops/{slug}/policies")
+        def provider_policies(slug: str, request: Request):
+            """The policies actually applied in the shop's namespace, read back from Kubernetes."""
+            provider(request)
+            tenant = shops.tenant_of(shop_or_404(slug))
+            documents = cluster_call(infrastructure.live_policies, tenant)
+            import yaml
+            return {"documents": len(documents), "yaml": yaml.safe_dump_all(documents, sort_keys=False)}
+
+        @app.get("/api/provider/admin/shops/{slug}/posture")
+        def provider_posture(slug: str, request: Request):
+            provider(request)
+            checks = cluster_call(infrastructure.posture, shops.tenant_of(shop_or_404(slug)))
+            passed = sum(1 for check in checks if check["passed"])
+            return {"score": round(passed / len(checks), 4) if checks else None, "passed": passed, "total": len(checks), "checks": checks}
+
+        @app.get("/api/provider/admin/shops/{slug}/usage")
+        def provider_usage(slug: str, request: Request):
+            provider(request)
+            return cluster_call(infrastructure.quota_usage, shops.tenant_of(shop_or_404(slug)))
+
+        @app.get("/api/mall/shops/{slug}/usage")
+        def owner_usage(slug: str, request: Request):
+            _, shop = manager(request, slug)
+            return cluster_call(infrastructure.quota_usage, shops.tenant_of(shop))
+
+        @app.get("/api/mall/shops/{slug}/team")
+        def team(slug: str, request: Request):
+            account, shop = manager(request, slug)
+            return {"owner_is_you": shop["owner_user_id"] == account["user_id"], "members": accounts.staff(slug)}
+
+        @app.post("/api/mall/shops/{slug}/team", status_code=201)
+        def team_add(slug: str, body: StaffInvite, request: Request):
+            account, _ = manager(request, slug, mutate=True, owner_only=True)
+            try:
+                member = accounts.add_staff(slug, body.email, account["user_id"])
+            except (ValueError, RetailError) as exc:
+                raise HTTPException(422, str(exc))
+            with store.connect() as db:
+                audit(db, f"merchant:{account['user_id']}", None, "shop.staff.added", f"{slug}:{member['id']}")
+            return member
+
+        @app.delete("/api/mall/shops/{slug}/team/{user_id}", status_code=204)
+        def team_remove(slug: str, user_id: str, request: Request):
+            account, _ = manager(request, slug, mutate=True, owner_only=True)
+            accounts.remove_staff(slug, user_id)
+            with store.connect() as db:
+                audit(db, f"merchant:{account['user_id']}", None, "shop.staff.removed", f"{slug}:{user_id}")
+            return Response(status_code=204)
+
+        @app.get("/api/provider/admin/policy/advice")
+        def policy_advice(request: Request, window: int = 1800):
+            """Least-privilege review from observed flows. Suggestions only: nothing is applied."""
+            provider(request)
+            window = max(300, min(window, 86_400))
+            approved = store.approved_edges()
+            observations = store.policy_observations(window)
+            with store.connect() as db:
+                names = {row[0]: (row[1], row[2], row[3]) for row in db.execute("SELECT id,name,tenant_id,created FROM workloads WHERE desired!='deleted'")}
+                suspicious = {row[0] for row in db.execute("SELECT source_id FROM incidents WHERE status IN ('alert','quarantined','review')")}
+            used = {(row["source_workload"], row["destination_workload"]) for row in observations if row["verdict"] == "forwarded"}
+            now = time.time()
+            unused = [{"source": names[a][0], "destination": names[b][0], "recommendation": "remove-if-unneeded"}
+                      for a, b in sorted(approved) if (a, b) not in used and a in names and b in names
+                      and now - max(names[a][2], names[b][2]) > window]
+            blocked = []
+            for row in sorted((r for r in observations if r["verdict"] == "dropped"), key=lambda r: -r["flows"]):
+                cross = row["destination_tenant"] is not None and row["source_tenant"] != row["destination_tenant"]
+                keep = row["source_workload"] in suspicious or cross or row["destination_workload"] is None
+                item = {"source": row["source_name"], "destination": row["destination_name"] or "outside the cluster",
+                        "port": row["destination_port"], "attempts": row["flows"], "last_seen": row["last_seen"],
+                        "cross_tenant": cross, "suspicious_source": row["source_workload"] in suspicious,
+                        "recommendation": "keep-blocked" if keep else "review"}
+                if not keep and row["destination_name"]:
+                    item["draft"] = (
+                        "# Draft for review only. SecureCloud never applies this automatically.\n"
+                        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
+                        f"  name: allow-{row['source_name']}-to-{row['destination_name']}\n"
+                        "spec:\n  podSelector:\n    matchLabels:\n"
+                        f"      securecloud.io/workload: <{row['source_name']} workload label>\n"
+                        "  policyTypes: [Egress]\n  egress:\n  - to:\n    - podSelector:\n        matchLabels:\n"
+                        f"          securecloud.io/workload: <{row['destination_name']} workload label>\n"
+                        f"    ports:\n    - protocol: TCP\n      port: {row['destination_port']}\n")
+                blocked.append(item)
+            return {"window_seconds": window, "unused_permissions": unused, "blocked_paths": blocked[:40]}
+
+        @app.get("/api/provider/admin/security/incidents/{incident_id}/evidence")
+        def evidence_pack(incident_id: str, request: Request):
+            """One-click evidence bundle: incident, model findings, risk windows, containment, audit
+            trail and the namespace's live policies, with a SHA-256 over the content."""
+            provider(request)
+            incident = next((item for item in store.get_incidents() if item["id"] == incident_id), None)
+            if incident is None:
+                raise HTTPException(404, "Incident not found")
+            start = incident["createdAt"] - 600
+            with store.connect() as db:
+                risk = [dict(row) for row in db.execute(
+                    "SELECT * FROM risk_observations WHERE source_id=? AND window_end>=? ORDER BY window_end", (incident["sourceId"], start))]
+                trail = [dict(row) for row in db.execute(
+                    "SELECT at,actor,action,resource,outcome FROM audit WHERE tenant_id=? AND at>=? ORDER BY id", (incident["tenantId"], start))]
+            try:
+                policies = infrastructure.live_policies(incident["tenantId"]) if infrastructure is not None else []
+            except Exception as exc:
+                policies = [{"unavailable": str(exc)}]
+            content = {
+                "incident": incident,
+                "findings": [f for f in store.detection_findings() if f["incident_id"] == incident_id],
+                "containment": store.get_containment_request(incident_id),
+                "risk_windows": risk,
+                "audit_trail": trail,
+                "live_policies": policies,
+                "detector": {"model": telemetry_status.get("detector"), "threshold_note": "per-window threshold is stored with each risk window"},
+            }
+            canonical = json.dumps(content, sort_keys=True, default=str)
+            bundle = {"format": "securecloud-evidence-v1", "generated_at": time.time(), "sha256": sha256(canonical.encode()).hexdigest(), **content}
+            return JSONResponse(bundle, headers={"Content-Disposition": f'attachment; filename="evidence-{incident_id}.json"'})
+
+        @app.get("/api/provider/admin/lab/scorecard")
+        def lab_scorecard(request: Request, days: int = 7):
+            provider(request)
+            from .lab.scorecard import compute
+            return compute(store, time.time() - max(1, min(days, 90)) * 86_400)
+
+        @app.get("/api/mall/shops/{slug}/status")
+        def mall_status(slug: str, request: Request):
+            account = merchant(request)
+            shop = shops.get(slug)
+            if shop is None or shop["owner_user_id"] != account["user_id"]:
+                raise HTTPException(404, "Shop not found")
+            return shops.state(shop)
     else:
         app.include_router(create_retail_router(retail_store, **common))
 

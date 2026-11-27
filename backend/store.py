@@ -16,6 +16,7 @@ from .infrastructure import (
     StackRequest,
     WorkloadRequest,
 )
+from .catalog import shop_stack_ids
 from .telemetry.schema import NormalizedFlow, WorkloadIdentity
 
 REFERENCE_LAB_REVISION = "0.2.0"
@@ -621,7 +622,7 @@ class Store:
         """Return bounded model features; no infrastructure credentials are exposed."""
         with self.connect() as db:
             rows = db.execute(
-                """SELECT id,tenant_id,template,desired,observed,quarantined
+                """SELECT id,tenant_id,template,desired,observed,quarantined,created
                    FROM workloads WHERE desired!='deleted' ORDER BY tenant_id,id""",
             ).fetchall()
         return [
@@ -631,6 +632,7 @@ class Store:
                 "template": row["template"],
                 "running": row["desired"] == "running" and row["observed"] == "running",
                 "quarantined": bool(row["quarantined"]),
+                "created": float(row["created"] or 0.0),
             }
             for row in rows
         ]
@@ -823,10 +825,11 @@ class Store:
     def retail_security_scope(self, retail_tenant_id: str) -> set[str]:
         """Return the explicitly deployed lab tenant scope (shops and legacy retail/vendor)."""
         with self.connect() as db:
+            stacks = ("retail-stack", "facilities-vendor-stack", "platform-stack") + shop_stack_ids()
             rows = db.execute(
-                """SELECT DISTINCT tenant_id FROM stack_deployments
-                   WHERE desired!='deleted'
-                     AND stack_id IN ('retail-stack','facilities-vendor-stack','northstar-shop-stack','bloom-shop-stack','platform-stack')"""
+                f"""SELECT DISTINCT tenant_id FROM stack_deployments
+                   WHERE desired!='deleted' AND stack_id IN ({",".join("?" * len(stacks))})""",
+                stacks,
             ).fetchall()
         # The retail-domain tenant reference is also valid when both planes use
         # the same stable tenant ID (for tests and future configured adapters).
@@ -920,6 +923,18 @@ class Store:
             })
         return events
 
+    def policy_observations(self, window_seconds: float = 1800.0) -> list[dict]:
+        """Resolved flows in the window, grouped by path and verdict (input for the policy advisor)."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_workload,source_name,source_tenant,destination_workload,destination_name,destination_tenant,
+                          destination_port,verdict,count(*) AS flows,max(observed_at) AS last_seen
+                   FROM normalized_flows WHERE observed_at>=? AND identity_status='resolved' AND verdict IN ('forwarded','dropped')
+                   GROUP BY source_workload,destination_workload,destination_port,verdict""",
+                (time.time() - window_seconds,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def approved_edges(self) -> set[tuple[str, str]]:
         """Return approved intents: generic web→API and API→database template edges plus
         every composite stack's declared service dependencies from the server catalog."""
@@ -955,10 +970,11 @@ class Store:
             platform = [row["id"] for row in db.execute(
                 """SELECT w.id FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id
                    WHERE s.stack_id='platform-stack' AND s.desired!='deleted' AND w.observed='running'""")]
+            shop_stacks = shop_stack_ids()
             for row in db.execute(
-                """SELECT w.id FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id
-                   WHERE s.stack_id IN ('northstar-shop-stack','bloom-shop-stack') AND s.desired!='deleted'
-                     AND w.observed='running' AND w.name LIKE '%-api'"""):
+                f"""SELECT w.id FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id
+                   WHERE s.stack_id IN ({",".join("?" * len(shop_stacks))}) AND s.desired!='deleted'
+                     AND w.observed='running' AND w.name LIKE '%-api'""", shop_stacks):
                 edges.update((row["id"], target) for target in platform)
         return edges
 

@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS shop_roles(
  user_id TEXT NOT NULL REFERENCES retail_users(id) ON DELETE CASCADE,
  shop TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN('owner','provider')),
  PRIMARY KEY(user_id, shop));
+CREATE TABLE IF NOT EXISTS shop_staff(
+ user_id TEXT NOT NULL REFERENCES retail_users(id) ON DELETE CASCADE,
+ shop TEXT NOT NULL, added_by TEXT NOT NULL, added_at REAL NOT NULL,
+ PRIMARY KEY(user_id, shop));
 """
 
 
@@ -24,9 +28,32 @@ class AccountStore(RetailStore):
             db.executescript(ROLES_SCHEMA)
 
     def role(self, user_id: str, shop: str) -> str:
+        """owner/provider from shop_roles; invited staff manage the shop like its owner (except the team)."""
         with self.connect() as db:
             row = db.execute("SELECT role FROM shop_roles WHERE user_id=? AND shop=?", (user_id, shop)).fetchone()
-        return row["role"] if row else "customer"
+            if row:
+                return row["role"]
+            staff = db.execute("SELECT 1 FROM shop_staff WHERE user_id=? AND shop=?", (user_id, shop)).fetchone()
+        return "owner" if staff else "customer"
+
+    def staff(self, shop: str) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("""SELECT s.user_id,u.email,u.display_name,s.added_at FROM shop_staff s
+                                 JOIN retail_users u ON u.id=s.user_id WHERE s.shop=? ORDER BY s.added_at""", (shop,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_staff(self, shop: str, email: str, added_by: str) -> dict:
+        email = self.normalize_email(email)
+        with self.connect() as db:
+            user = db.execute("SELECT id,email,display_name FROM retail_users WHERE email=? AND status='active'", (email,)).fetchone()
+            if user is None:
+                raise ValueError("No SecureCloud account uses that email. Ask them to sign up first.")
+            db.execute("INSERT INTO shop_staff VALUES(?,?,?,?) ON CONFLICT(user_id,shop) DO NOTHING", (user["id"], shop, added_by, time.time()))
+        return dict(user)
+
+    def remove_staff(self, shop: str, user_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM shop_staff WHERE shop=? AND user_id=?", (shop, user_id))
 
     def grant(self, user_id: str, shop: str, role: str) -> None:
         with self.connect() as db:

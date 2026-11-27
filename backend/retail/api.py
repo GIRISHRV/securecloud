@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import re
+from io import BytesIO
+from fastapi.responses import FileResponse
+
 from hashlib import sha256
 import secrets
 import sqlite3
@@ -75,6 +81,10 @@ class ProductUpdate(Body):
     image_path: str | None = Field(default=None, max_length=240)
 
 
+class ImageUpload(Body):
+    data: str = Field(min_length=32, max_length=4_400_000)  # base64 data URL, about 3 MB of image
+
+
 class OrderStatus(Body):
     status: Literal["placed", "processing", "packing", "shipped", "delivered", "cancelled"]
 
@@ -95,7 +105,9 @@ def create_retail_router(
     shop_id: str = "northstar",
     prefix: str = "/api/retail",
     mode: str = "all",
-    mirror_upstream: str | None = None,
+    mirror_upstream=None,  # base URL or sender(path, payload) -> (status, body)
+    media_base: str | None = None,  # public URL prefix of this shop's API, for uploaded images
+    sample_catalog="default",  # this shop's own sample rows; None = no sample data (template shops)
 ) -> APIRouter:
     """One shop's API (mode="shop"), the provider console (mode="provider"), or both (legacy "all").
 
@@ -103,6 +115,16 @@ def create_retail_router(
     shop, and roles are granted per shop (owner) or for the provider console (provider).
     """
     router = APIRouter(prefix=prefix, tags=[f"{shop_id}-{mode}"])
+    media_url = f"{media_base if media_base is not None else prefix}/media"
+    media_dir = store.path.parent / "media" / re.sub(r"[^a-z0-9-]", "", shop_id.lower())
+    builtin_image = re.compile(r"^/products/[a-z0-9-]+(/[a-z0-9-]+)?\.(webp|svg)$")
+    uploaded_image = re.compile(rf"^{re.escape(media_url)}/[a-f0-9]{{32}}\.webp$")
+
+    def checked_image(path):
+        """Product images may only be built-in assets or this shop's own uploads (no external URLs)."""
+        if path in (None, "") or builtin_image.fullmatch(path) or uploaded_image.fullmatch(path):
+            return path
+        raise HTTPException(422, "Choose one of the images or upload your own")
     accounts = accounts or store
     shared = accounts is not store
     hasher = PasswordHasher()
@@ -293,14 +315,58 @@ def create_retail_router(
     @router.post("/admin/products", status_code=201)
     def create_product(body: Product, request: Request):
         session(request, mutate=True, owner=True)
+        checked_image(body.image_path)
         try:
             return store.save_product(body.model_dump())
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Product SKU already exists")
 
+    @router.post("/admin/media", status_code=201)
+    def upload_image(body: ImageUpload, request: Request):
+        """Owner uploads a product photo. It is decoded, size-limited and re-encoded to WebP, which
+        strips metadata and anything that is not pixels; the file name is the content hash."""
+        session(request, mutate=True, owner=True)
+        header, _, encoded = body.data.partition(",")
+        if header not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"):
+            raise HTTPException(415, "Upload a PNG, JPEG or WebP image")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(422, "The image could not be read")
+        if len(raw) > 3 * 1024 * 1024:
+            raise HTTPException(413, "Images must be 3 MB or smaller")
+        from PIL import Image, ImageOps
+        Image.MAX_IMAGE_PIXELS = 25_000_000  # refuse decompression bombs
+        try:
+            with Image.open(BytesIO(raw)) as probe:
+                probe.verify()
+            with Image.open(BytesIO(raw)) as image:
+                if image.format not in ("PNG", "JPEG", "WEBP"):
+                    raise HTTPException(415, "Upload a PNG, JPEG or WebP image")
+                picture = ImageOps.exif_transpose(image).convert("RGB")
+                picture.thumbnail((1200, 1200))
+                out = BytesIO()
+                picture.save(out, "WEBP", quality=82, method=4)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(422, "The image could not be read")
+        data = out.getvalue()
+        name = f"{sha256(data).hexdigest()[:32]}.webp"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        (media_dir / name).write_bytes(data)
+        return {"path": f"{media_url}/{name}"}
+
+    @router.get("/media/{name}")
+    def media(name: str):
+        if not re.fullmatch(r"[a-f0-9]{32}\.webp", name) or not (media_dir / name).is_file():
+            raise HTTPException(404, "Image not found")
+        return FileResponse(media_dir / name, media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"})
+
     @router.patch("/admin/products/{product_id}")
     def update_product(product_id: str, body: ProductUpdate, request: Request):
         session(request, mutate=True, owner=True)
+        checked_image(body.image_path)
         existing = store.product(product_id, True)
         if not existing:
             raise HTTPException(404, "Product not found")
@@ -559,7 +625,9 @@ def create_retail_router(
     @router.post("/admin/demo/load")
     def load_catalog(request: Request):
         session(request, mutate=True, owner=True)
-        items = store.seed_catalog()
+        if sample_catalog is None:
+            raise HTTPException(404, "This shop has no sample catalogue; add your own products")
+        items = store.seed_catalog(None if sample_catalog == "default" else sample_catalog)
         return {"items": items, "sample_orders": store.seed_sample_history()}
 
     @router.get("/admin/platform/services")
@@ -568,14 +636,15 @@ def create_retail_router(
         session(request, owner=True)
         if correlation_store is None:
             raise HTTPException(503, "Security plane unavailable")
-        from backend.catalog import PLATFORM_PROFILES, PLUGIN_PROFILES, stack_definition
+        from backend.catalog import PLATFORM_PROFILES, PLUGIN_PROFILES, shop_stack_ids, stack_definition
         with correlation_store.connect() as db:
+            stacks = shop_stack_ids() + ("platform-stack",)
             rows = db.execute(
-                """SELECT w.id,w.name,w.template,w.observed,w.quarantined,s.stack_id,t.name AS tenant
+                f"""SELECT w.id,w.name,w.template,w.observed,w.quarantined,s.stack_id,t.name AS tenant
                    FROM workloads w JOIN stack_deployments s ON s.id=w.stack_deployment_id JOIN tenants t ON t.id=w.tenant_id
-                   WHERE s.desired!='deleted' AND w.observed!='deleted'
-                     AND s.stack_id IN ('northstar-shop-stack','bloom-shop-stack','platform-stack')
-                   ORDER BY s.stack_id,w.name"""
+                   WHERE s.desired!='deleted' AND w.observed!='deleted' AND s.stack_id IN ({",".join("?" * len(stacks))})
+                   ORDER BY s.stack_id,w.name""",
+                stacks,
             ).fetchall()
         platform = [row["name"] for row in rows if row["stack_id"] == "platform-stack"]
         items = []

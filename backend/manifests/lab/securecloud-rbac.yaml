@@ -21,7 +21,14 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    # delete is for removing a self-service shop; the admission policy below limits it to
+    # SecureCloud-managed shop namespaces, so it can never touch system or testbed namespaces.
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Reach a tenant service through the API server proxy (order mirroring for self-service shops),
+  # instead of a port-forward per shop. Narrower than the pods/exec already granted below.
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get", "create"]
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
@@ -73,3 +80,37 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: securecloud-backend
 type: kubernetes.io/service-account-token
+---
+# Kubernetes-enforced guard for the delete permission above: the backend may delete a namespace
+# only if it is SecureCloud-managed and labelled kind=shop (a merchant shop tenant).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: securecloud-backend-deletes-only-shops
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: securecloud-backend-only
+      expression: "request.userInfo.username == 'system:serviceaccount:securecloud-system:securecloud-backend'"
+  validations:
+    - expression: >-
+        has(oldObject.metadata.labels) &&
+        oldObject.metadata.labels.exists(k, k == 'app.kubernetes.io/managed-by') &&
+        oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'securecloud' &&
+        oldObject.metadata.labels.exists(k, k == 'securecloud.io/kind') &&
+        oldObject.metadata.labels['securecloud.io/kind'] == 'shop'
+      message: "SecureCloud may delete only its own shop namespaces"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: securecloud-backend-deletes-only-shops
+spec:
+  policyName: securecloud-backend-deletes-only-shops
+  validationActions: ["Deny"]
