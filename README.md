@@ -7,7 +7,10 @@ detects the behaviour with a temporal-graph model, and quarantines the affected 
 
 ## Live demo
 
-**https://74-225-145-124.sslip.io**
+**https://securecloud-wake-qudb8c.azurewebsites.net**
+
+The lab sleeps when nobody is using it. This link wakes it and shows a boot screen for about
+3 minutes, then forwards you to the live site at https://74-225-145-124.sslip.io.
 
 | Public guest login | |
 |---|---|
@@ -17,7 +20,7 @@ detects the behaviour with a temporal-graph model, and quarantines the affected 
 The guest login is public on purpose. The server lets it explore the provider console, run the
 attack lab and quarantine/restore **testbed** workloads. It cannot remove, pause or reconfigure
 shops, open shops, or see merchants' email addresses. Everyone shares one demo, so you may see
-someone else's attack in progress. The site may be switched off outside demo hours.
+someone else's attack in progress. It goes back to sleep after 30 minutes without visitors.
 
 ### Try it in two minutes
 

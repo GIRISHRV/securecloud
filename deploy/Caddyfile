@@ -1,6 +1,13 @@
 # SecureCloud public entry point. Caddy obtains and renews the HTTPS certificate automatically.
 @DOMAIN@ {
 	encode zstd gzip
+	# Read by deploy/bin/idle-shutdown.sh to tell whether anyone is using the site.
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 2
+		}
+	}
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff

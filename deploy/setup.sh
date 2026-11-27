@@ -117,6 +117,7 @@ SECURECLOUD_KUBECONFIG=${DATA}/securecloud.kubeconfig
 SECURECLOUD_HUBBLE_EXPORT=${DATA}/hubble-current.jsonl
 SECURECLOUD_SHOP_QUOTA=5
 SECURECLOUD_FLOW_RETENTION_SECONDS=86400
+SECURECLOUD_IDLE_MINUTES=${SECURECLOUD_IDLE_MINUTES:-30}
 SECURECLOUD_GUEST_LOGIN=$(sed -n 's/^GUEST=//p' "${ETC}/demo-accounts.env")
 EOF
 chmod 0640 "${ETC}/securecloud.env" && chgrp securecloud "${ETC}/securecloud.env"
@@ -129,13 +130,14 @@ run_as_app() { sudo -u securecloud --preserve-env=PYTHONPATH env $(grep -v '^#' 
     --database "${DATA}/commerce.sqlite" --accounts "${ETC}/demo-accounts.env" )
 
 step "Services"
-for unit in "${APP}"/deploy/systemd/*.service; do
+for unit in "${APP}"/deploy/systemd/*.service "${APP}"/deploy/systemd/*.timer; do
   sed "s#@APP@#${APP}#g; s#@DATA@#${DATA}#g; s#@ETC@#${ETC}#g" "${unit}" > "/etc/systemd/system/$(basename "${unit}")"
 done
 chmod +x "${APP}"/deploy/bin/*.sh "${APP}"/backend/manifests/lab/*.sh
 systemctl daemon-reload
 systemctl enable --now securecloud-hubble-relay securecloud-hubble-capture securecloud-shop-forwards securecloud-api
 systemctl restart securecloud-api
+systemctl enable --now securecloud-idle.timer   # no-op unless the VM has a managed identity allowed to deallocate itself
 
 step "Caddy (HTTPS with an automatic Let's Encrypt certificate)"
 if ! command -v caddy >/dev/null; then

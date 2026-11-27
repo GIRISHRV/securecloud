@@ -28,6 +28,18 @@ services, testbed storefront forwards, and Caddy with an automatic HTTPS certifi
 mode uses secure `__Host-` cookies and refuses to seed any account password shorter than
 16 characters. Logs: `journalctl -u securecloud-api -f`.
 
+### Sleep when idle, wake on visit (optional)
+
+`deploy/bin/idle-shutdown.sh` (systemd timer every 5 minutes) deallocates the VM after
+`SECURECLOUD_IDLE_MINUTES` (default 30) without a real visitor, using the VM's managed identity.
+Grant it with `az vm identity assign` and a *Virtual Machine Contributor* role assignment scoped to
+the VM; without that the timer does nothing.
+
+`deploy/wake/` is an Azure Function (Flex Consumption) used as the public entry point. It shows a
+boot screen, starts the VM from the page's JavaScript (so link previews and crawlers do not wake
+it), and redirects once the shops answer. Its managed identity needs the same role on the VM, and
+it reads `SC_SUBSCRIPTION`, `SC_RESOURCE_GROUP`, `SC_VM` and `SC_SITE` from its app settings.
+
 ## Local lab (Windows + WSL)
 
 ## 1. Cluster (WSL Ubuntu with systemd, or any Linux host)

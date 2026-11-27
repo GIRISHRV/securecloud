@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SecureCloud · Waking up</title>
+<style>
+  :root { --bg:#0b1020; --card:#121a33; --ink:#eef2ff; --muted:#93a0c4; --accent:#5b8cff; --ok:#3ccf8e; --line:#24304f; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:16px; background:radial-gradient(1200px 600px at 20% -10%, #1b2a5a 0%, var(--bg) 60%); color:var(--ink); font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { width:100%; max-width:520px; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:32px 28px; box-shadow:0 30px 80px rgba(0,0,0,.45); }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.2px; }
+  .brand span { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; background:var(--accent); }
+  h1 { margin:22px 0 6px; font-size:1.7rem; line-height:1.2; }
+  p { margin:0; color:var(--muted); }
+  ol { list-style:none; margin:26px 0 0; padding:0; display:grid; gap:14px; }
+  li { display:flex; align-items:center; gap:12px; color:var(--muted); }
+  li i { flex:none; width:22px; height:22px; border-radius:50%; border:2px solid var(--line); }
+  li.active { color:var(--ink); }
+  li.active i { border-color:var(--accent); border-top-color:transparent; animation:spin .8s linear infinite; }
+  li.done { color:var(--ink); }
+  li.done i { border-color:var(--ok); background:var(--ok); box-shadow:inset 0 0 0 4px var(--card); }
+  .bar { margin-top:26px; height:6px; border-radius:6px; background:var(--line); overflow:hidden; }
+  .bar b { display:block; height:100%; width:4%; background:linear-gradient(90deg,var(--accent),var(--ok)); transition:width 1s ease; }
+  .meta { display:flex; justify-content:space-between; margin-top:10px; font-size:.85rem; color:var(--muted); }
+  .err { display:none; margin-top:18px; padding:12px 14px; border-radius:12px; background:#3a1622; color:#ffc9d4; font-size:.9rem; }
+  a { color:var(--accent); }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { li.active i { animation:none; } .bar b { transition:none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand"><span>S</span>SecureCloud</div>
+  <h1>Waking up the demo cloud</h1>
+  <p>To save credit, this lab sleeps when nobody is using it. Starting the server, Kubernetes and the shops takes about 3 minutes. This page continues by itself.</p>
+  <ol>
+    <li id="s-vm"><i></i>Starting the virtual machine</li>
+    <li id="s-k8s"><i></i>Booting Kubernetes, Cilium and the shops</li>
+    <li id="s-ready"><i></i>Opening SecureCloud</li>
+  </ol>
+  <div class="bar"><b id="bar"></b></div>
+  <div class="meta"><span id="note">Contacting Azure…</span><span id="clock">0:00</span></div>
+  <div class="err" id="err">Still not up after 8 minutes. Try refreshing, or open <a href="{{SITE}}">{{SITE}}</a> directly.</div>
+</main>
+<script>
+  const target = "{{SITE}}{{PATH}}";
+  const started = Date.now();
+  const $ = (id) => document.getElementById(id);
+  const step = (id, state) => { $(id).className = state; };
+  let vmUpAt = 0;
+  setInterval(() => {
+    const s = Math.floor((Date.now() - started) / 1000);
+    $("clock").textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    if (s > 480) $("err").style.display = "block";
+  }, 1000);
+  async function poll() {
+    try {
+      const r = await fetch("api/status", { cache: "no-store" });
+      const st = await r.json();
+      const elapsed = (Date.now() - started) / 1000;
+      if (st.ready) {
+        step("s-vm", "done"); step("s-k8s", "done"); step("s-ready", "active");
+        $("bar").style.width = "100%"; $("note").textContent = "Ready";
+        setTimeout(() => location.replace(target), 600);
+        return;
+      }
+      if (st.power === "running") {
+        if (!vmUpAt) vmUpAt = Date.now();
+        step("s-vm", "done"); step("s-k8s", "active");
+        const k = (Date.now() - vmUpAt) / 1000;
+        $("bar").style.width = Math.min(95, 35 + k / 150 * 60) + "%";
+        $("note").textContent = "Server is up, starting services…";
+      } else {
+        step("s-vm", "active");
+        $("bar").style.width = Math.min(33, 4 + elapsed / 90 * 29) + "%";
+        $("note").textContent = "Azure is starting the server (" + st.power + ")…";
+      }
+    } catch (e) { $("note").textContent = "Retrying…"; }
+    setTimeout(poll, 4000);
+  }
+  fetch("api/wake", { method: "POST" }).catch(() => {}).finally(poll);
+</script>
+</body>
+</html>

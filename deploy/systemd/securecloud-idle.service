@@ -1,0 +1,7 @@
+[Unit]
+Description=SecureCloud: deallocate the VM when nobody has used the site for a while
+
+[Service]
+Type=oneshot
+EnvironmentFile=@ETC@/securecloud.env
+ExecStart=@APP@/deploy/bin/idle-shutdown.sh
