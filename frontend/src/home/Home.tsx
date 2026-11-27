@@ -105,6 +105,10 @@ export default function Home() {
   const online = useLabOnline();
   const { shops, quota } = useMall();
   const full = quota ? quota.used >= quota.limit : false;
+  const [guest, setGuest] = useState<{ email: string; password: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/mall/guest").then((r) => (r.ok ? r.json() : null)).then((g) => { if (g?.email) setGuest(g); }).catch(() => undefined);
+  }, []);
   useEffect(() => { document.title = "SecureCloud · Zero trust for shared clouds"; }, []);
 
   return (
@@ -127,6 +131,9 @@ export default function Home() {
             <a className="st-btn st-btn-ghost" href="#story">See how it works<ArrowDown size={18} aria-hidden="true" /></a>
             <a className="st-btn st-btn-ghost" href="/lab"><FlaskConical size={18} aria-hidden="true" />Try an attack</a>
           </div>
+          {guest && (
+            <p className="st-guest">No account needed. Guest login: <code>{guest.email}</code> / <code>{guest.password}</code></p>
+          )}
         </div>
         <div className="st-hero-art" aria-hidden="true">
           <Shot className="back" src="/home/northstar-shop.jpg" url="northstar / shop" alt="" />

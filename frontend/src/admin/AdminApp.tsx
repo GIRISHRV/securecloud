@@ -70,6 +70,20 @@ export default function AdminApp() {
 function OwnerLogin({ service, initialError, onSuccess }: { service: AdminService; initialError: string; onSuccess: (user: RetailUser) => void }) {
   const [error, setError] = useState(initialError);
   const [busy, setBusy] = useState(false);
+  const [guest, setGuest] = useState<{ email: string; password: string } | null>(null);
+  useEffect(() => {
+    if (!IS_PROVIDER && !IS_LAB) return;
+    let live = true;
+    fetch("/api/mall/guest").then((r) => (r.ok ? r.json() : null)).then((g) => { if (live && g?.email) setGuest(g); }).catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+  async function signInAsGuest() {
+    if (!guest) return;
+    setBusy(true); setError("");
+    try { onSuccess(await service.login(guest.email, guest.password)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Sign in failed"); }
+    finally { setBusy(false); }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const data = new FormData(event.currentTarget);
@@ -89,6 +103,14 @@ function OwnerLogin({ service, initialError, onSuccess }: { service: AdminServic
           {error && <p className="ad-inline-error" role="alert">{error}</p>}
           <button className="ad-button ad-button-primary ad-button-block" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
         </form>
+        {guest && (
+          <div className="ad-guest">
+            <strong>Just looking? Use the public guest login</strong>
+            <span>It can explore the console and run the lab, but can't remove or change shops.</span>
+            <code>{guest.email}<br />{guest.password}</code>
+            <button type="button" className="ad-button ad-button-block" disabled={busy} onClick={() => void signInAsGuest()}>Sign in as guest</button>
+          </div>
+        )}
         {!IS_PROVIDER && <a className="ad-login-back" href={STOREFRONT}>← Back to storefront</a>}
       </section>
       <aside className="ad-login-art" aria-hidden="true">

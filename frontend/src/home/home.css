@@ -43,6 +43,8 @@
 .st-hero h1 span { color: #f97066; }
 .st-lead { margin-top: 1.2rem; color: #c9d4f0; font-size: clamp(1.25rem, 2.4vw, 1.6rem); font-weight: 500; }
 .st-actions { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.9rem; }
+.st-guest { margin-top: 1rem; font-size: .95rem; opacity: .8; overflow-wrap: anywhere; }
+.st-guest code { padding: .1rem .4rem; border-radius: 6px; background: rgba(127,127,127,.15); user-select: all; }
 
 /* Story timeline */
 .st-story { max-width: calc(var(--st-w) + 32px); margin: 0 auto; padding: 1rem 16px 0; }
