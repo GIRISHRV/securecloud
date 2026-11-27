@@ -26,14 +26,41 @@ apt-get update -q
 apt-get install -y -q ca-certificates curl git docker.io python3-venv python3-pip gnupg debian-keyring debian-archive-keyring apt-transport-https
 systemctl enable --now docker
 
+step "Network MTU ${MTU:-1400} (Azure drops full-size 1500-byte packets on this path; large TLS handshakes stall)"
+IFACE="$(ip -o route get 1.1.1.1 | awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')"
+cat > /etc/systemd/system/securecloud-mtu.service <<EOF
+[Unit]
+Description=SecureCloud: clamp ${IFACE} MTU so large packets are not silently dropped
+After=network-online.target
+Wants=network-online.target
+Before=k3s.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip link set ${IFACE} mtu ${MTU:-1400}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+MTU_BEFORE="$(cat /sys/class/net/${IFACE}/mtu)"
+systemctl enable --now securecloud-mtu
+systemctl restart securecloud-mtu
+
 step "Kubernetes (K3s) + Cilium + Hubble"
 bash "${APP}/backend/manifests/lab/install-k3s-cilium.sh"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+if [[ "${MTU_BEFORE}" != "${MTU:-1400}" ]] && k3s kubectl -n kube-system get ds cilium >/dev/null 2>&1; then
+  # Cilium reads the device MTU at start-up; restart it so pod routes use the new size.
+  k3s kubectl -n kube-system rollout restart ds/cilium
+  k3s kubectl -n kube-system rollout status ds/cilium --timeout=300s
+fi
 k3s kubectl apply -f "${APP}/backend/manifests/lab/securecloud-rbac.yaml"
 
 step "Workload images (shop template, platform services, storefront)"
-docker build --network host -q -t docker.io/securecloud/reference-api:0.6.0 "${APP}/backend/reference_apps"
-docker build --network host -q -t docker.io/securecloud/reference-web:0.2.0 "${APP}/frontend/reference-app"
+docker build --network host -t docker.io/securecloud/reference-api:0.6.0 "${APP}/backend/reference_apps"
+docker build --network host -t docker.io/securecloud/reference-web:0.2.0 "${APP}/frontend/reference-app"
 docker save docker.io/securecloud/reference-api:0.6.0 docker.io/securecloud/reference-web:0.2.0 | k3s ctr images import -
 
 step "Service user, data directory and least-privilege kubeconfig"
